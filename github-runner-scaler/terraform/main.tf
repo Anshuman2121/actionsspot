@@ -333,6 +333,7 @@ resource "aws_lambda_function" "github_runner_scaler" {
   timeout         = 900 # 15 minutes
   memory_size      = 512
   architectures    = ["x86_64"]
+  source_code_hash = filebase64sha256("github-runner-scaler.zip")
 
   environment {
     variables = {
