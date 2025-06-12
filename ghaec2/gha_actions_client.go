@@ -153,8 +153,14 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 		"organization", org,
 		"baseURL", c.baseURL)
 	
-	// For GitHub Enterprise, we use the organization's runner groups endpoint
+	// For GitHub Enterprise, we need to use the correct API endpoint
+	// The registration token endpoint for GitHub Enterprise
 	url := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runners/registration-token", c.baseURL, org)
+	
+	c.logger.Info("Getting registration token",
+		"organization", org,
+		"baseURL", c.baseURL,
+		"tokenLength", len(c.token))
 	
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
@@ -164,7 +170,7 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	
-	c.logger.Info("Sending registration request", 
+	c.logger.Info("Sending registration token request", 
 		"url", url,
 		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
 	
@@ -191,9 +197,41 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 	c.adminTokenExpiry = result.ExpiresAt
 	c.actionsTokenURL = c.baseURL
 	
-	c.logger.Info("Successfully initialized",
-		"tokenExpiry", c.adminTokenExpiry,
+	c.logger.Info("Successfully obtained registration token",
+		"expiresAt", c.adminTokenExpiry.Unix(),
 		"tokenLength", len(c.adminToken))
+	
+	// Now get the Actions Service admin connection
+	c.logger.Info("Getting Actions Service admin connection",
+		"baseURL", c.baseURL,
+		"regTokenLength", len(c.adminToken))
+	
+	// For GitHub Enterprise, we use the runner registration endpoint
+	url = fmt.Sprintf("%s/api/v3/actions/runners", c.baseURL)
+	
+	req, err = http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create admin connection request: %w", err)
+	}
+	
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	
+	c.logger.Info("Sending admin connection request",
+		"url", url,
+		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
+	
+	resp, err = c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send admin connection request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return c.parseErrorResponse(resp)
+	}
+	
+	c.logger.Info("Successfully initialized Actions Service client")
 	
 	return nil
 }

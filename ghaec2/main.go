@@ -134,6 +134,12 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.GitHubEnterpriseURL, "https://") {
 		return fmt.Errorf("GITHUB_ENTERPRISE_URL must start with 'https://'")
 	}
+
+	// Remove any trailing slashes from GitHub Enterprise URL
+	c.GitHubEnterpriseURL = strings.TrimSuffix(c.GitHubEnterpriseURL, "/")
+
+	// Ensure URL doesn't contain /api/v3 as it will be added by the client
+	c.GitHubEnterpriseURL = strings.TrimSuffix(c.GitHubEnterpriseURL, "/api/v3")
 	
 	if c.MaxRunners <= 0 {
 		return fmt.Errorf("MAX_RUNNERS must be > 0")
