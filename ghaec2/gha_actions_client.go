@@ -17,8 +17,8 @@ import (
 
 // GitHub Actions Service API endpoints
 const (
-	scaleSetEndpoint     = "_apis/runtime/runnerscalesets"
-	apiVersion           = "6.0-preview"
+	scaleSetEndpoint     = "api/v3/actions/runner-groups"
+	apiVersion           = "2.0"
 )
 
 // AcquirableJob represents a job that can be acquired by a runner
@@ -153,59 +153,165 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 		"organization", org,
 		"baseURL", c.baseURL)
 	
-	// First, try to get a registration token to discover the Actions Service URL
-	regToken, err := c.getRegistrationToken(ctx, org)
+	// For GitHub Enterprise, we use the organization's runner groups endpoint
+	url := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runners/registration-token", c.baseURL, org)
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to get registration token: %w", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	
-	c.logger.Info("Successfully obtained registration token")
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	
-	// For GitHub Enterprise, we use the same base URL for the Actions Service
+	c.logger.Info("Sending registration request", 
+		"url", url,
+		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusCreated {
+		return c.parseErrorResponse(resp)
+	}
+	
+	var result struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+	
+	c.adminToken = result.Token
+	c.adminTokenExpiry = result.ExpiresAt
 	c.actionsTokenURL = c.baseURL
 	
-	// Get Actions Service admin connection
-	adminConn, err := c.getActionsServiceAdminConnection(ctx, regToken)
-	if err != nil {
-		return fmt.Errorf("failed to get Actions Service admin connection: %w", err)
-	}
-	
-	if adminConn.AdminToken == nil {
-		return fmt.Errorf("no admin token received in response")
-	}
-	
-	c.adminToken = *adminConn.AdminToken
-	c.adminTokenExpiry = time.Now().Add(1 * time.Hour) // Tokens typically expire in 1 hour
-	
-	c.logger.Info("Initialized Actions Service client",
-		"actionsServiceURL", c.actionsTokenURL,
+	c.logger.Info("Successfully initialized",
 		"tokenExpiry", c.adminTokenExpiry,
-	)
+		"tokenLength", len(c.adminToken))
 	
 	return nil
 }
 
 // GetOrCreateRunnerScaleSet gets an existing scale set or creates a new one
 func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, name string, labels []string) (*RunnerScaleSet, error) {
-	if err := c.refreshTokenIfNeeded(ctx); err != nil {
-		return nil, fmt.Errorf("failed to refresh token: %w", err)
+	// For GitHub Enterprise, we use the organization's runner groups
+	url := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runner-groups", c.baseURL, name)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	
-	c.logger.Info("Creating runner scale set", "name", name, "labels", labels)
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	
-	newScaleSet := &RunnerScaleSet{
-		Name: name,
-		Labels: make([]Label, len(labels)),
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseErrorResponse(resp)
+	}
+	
+	var result struct {
+		TotalCount int `json:"total_count"`
+		RunnerGroups []struct {
+			ID              int      `json:"id"`
+			Name            string   `json:"name"`
+			Visibility      string   `json:"visibility"`
+			Default         bool     `json:"default"`
+			Selected        bool     `json:"selected"`
+			Runners        []string `json:"runners"`
+		} `json:"runner_groups"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	
+	// Find or create the runner group
+	var groupID int
+	for _, group := range result.RunnerGroups {
+		if group.Name == name {
+			groupID = group.ID
+			break
+		}
+	}
+	
+	if groupID == 0 {
+		// Create new runner group
+		createURL := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runner-groups", c.baseURL, name)
+		payload := struct {
+			Name       string   `json:"name"`
+			Visibility string   `json:"visibility"`
+			Labels     []string `json:"labels"`
+		}{
+			Name:       name,
+			Visibility: "org",
+			Labels:     labels,
+		}
+		
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		
+		req, err := http.NewRequestWithContext(ctx, "POST", createURL, bytes.NewBuffer(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		
+		req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		req.Header.Set("Content-Type", "application/json")
+		
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode != http.StatusCreated {
+			return nil, c.parseErrorResponse(resp)
+		}
+		
+		var newGroup struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		}
+		
+		if err := json.NewDecoder(resp.Body).Decode(&newGroup); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		
+		groupID = newGroup.ID
+	}
+	
+	// Convert to RunnerScaleSet format
+	scaleSet := &RunnerScaleSet{
+		ID:              groupID,
+		Name:            name,
+		RunnerGroupID:   groupID,
+		RunnerGroupName: name,
+		Labels:          make([]Label, len(labels)),
 	}
 	
 	for i, label := range labels {
-		newScaleSet.Labels[i] = Label{
+		scaleSet.Labels[i] = Label{
 			Type: "string",
 			Name: label,
 		}
 	}
 	
-	return c.createRunnerScaleSet(ctx, newScaleSet)
+	return scaleSet, nil
 }
 
 // GetAcquirableJobs gets jobs that can be acquired by the scale set
@@ -340,154 +446,6 @@ func (c *ActionsServiceClient) refreshTokenIfNeeded(ctx context.Context) error {
 	
 	c.logger.Info("Token expired, need to restart service to get new token")
 	return fmt.Errorf("token expired - restart service to refresh")
-}
-
-func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org string) (string, error) {
-	c.logger.Info("Getting registration token", 
-		"organization", org,
-		"baseURL", c.baseURL,
-		"tokenLength", len(c.token))
-
-	url := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runners/registration-token", c.baseURL, org)
-	
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	
-	c.logger.Info("Sending registration token request", 
-		"url", url,
-		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
-	
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusCreated {
-		return "", c.parseErrorResponse(resp)
-	}
-	
-	var result struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-	
-	c.logger.Info("Successfully obtained registration token",
-		"expiresAt", result.ExpiresAt,
-		"tokenLength", len(result.Token))
-	
-	return result.Token, nil
-}
-
-type ActionsServiceAdminConnection struct {
-	ActionsServiceURL *string `json:"url,omitempty"`
-	AdminToken        *string `json:"token,omitempty"`
-}
-
-func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Context, regToken string) (*ActionsServiceAdminConnection, error) {
-	c.logger.Info("Getting Actions Service admin connection", 
-		"baseURL", c.baseURL,
-		"regTokenLength", len(regToken))
-
-	// For GitHub Enterprise, we need to use the same base URL
-	url := fmt.Sprintf("%s/api/v3/actions/runner-registration", c.baseURL)
-	
-	payload := struct {
-		URL   string `json:"url"`
-		Token string `json:"token"`
-	}{
-		URL:   c.baseURL,
-		Token: regToken,
-	}
-	
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-	
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	
-	// Use the GitHub token for authentication, not the registration token
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	
-	c.logger.Info("Sending admin connection request", 
-		"url", url,
-		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
-	
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, c.parseErrorResponse(resp)
-	}
-	
-	var result ActionsServiceAdminConnection
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-	
-	if result.ActionsServiceURL == nil {
-		// If no specific Actions Service URL is provided, use the base GitHub Enterprise URL
-		result.ActionsServiceURL = &c.baseURL
-	}
-	
-	c.logger.Info("Successfully obtained admin connection",
-		"actionsServiceURL", *result.ActionsServiceURL,
-		"adminTokenLength", len(*result.AdminToken))
-	
-	return &result, nil
-}
-
-func (c *ActionsServiceClient) createRunnerScaleSet(ctx context.Context, scaleSet *RunnerScaleSet) (*RunnerScaleSet, error) {
-	path := fmt.Sprintf("/%s", scaleSetEndpoint)
-	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsTokenURL, path, apiVersion)
-	
-	body, err := json.Marshal(scaleSet)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal scale set: %w", err)
-	}
-	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.adminToken))
-	req.Header.Set("Content-Type", "application/json")
-	
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, c.parseErrorResponse(resp)
-	}
-	
-	var createdScaleSet RunnerScaleSet
-	if err := json.NewDecoder(resp.Body).Decode(&createdScaleSet); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-	
-	return &createdScaleSet, nil
 }
 
 func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
