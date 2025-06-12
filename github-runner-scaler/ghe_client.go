@@ -383,58 +383,97 @@ type RunnerDemandAnalysis struct {
 func (c *GHEClient) FilterWorkflowsMatchingLabels(ctx context.Context, workflows []WorkflowRun, configuredLabels []string) ([]WorkflowRun, error) {
 	var matchingWorkflows []WorkflowRun
 
-	for _, workflow := range workflows {
+	log.Printf("🔍 Checking %d workflows against configured labels %v", len(workflows), configuredLabels)
+
+	for i, workflow := range workflows {
 		if workflow.Repository == nil {
+			log.Printf("⚠️  Workflow %d has no repository info, skipping", workflow.ID)
 			continue
 		}
+
+		log.Printf("🔄 [%d/%d] Checking workflow %d in %s (status: %s)", 
+			i+1, len(workflows), workflow.ID, workflow.Repository.FullName, workflow.Status)
 
 		// Get jobs for this workflow
 		jobs, err := c.GetWorkflowJobs(ctx, workflow.Repository.Owner.Login, workflow.Repository.Name, workflow.ID)
 		if err != nil {
-			log.Printf("Warning: failed to get jobs for workflow %d in %s: %v", workflow.ID, workflow.Repository.FullName, err)
+			log.Printf("❌ Failed to get jobs for workflow %d in %s: %v", workflow.ID, workflow.Repository.FullName, err)
 			continue
 		}
 
+		log.Printf("📋 Found %d jobs for workflow %d", len(jobs), workflow.ID)
+
 		// Check if any job requires labels that match our configured labels
 		hasMatchingJob := false
-		for _, job := range jobs {
-			if job.Status != "queued" && job.Status != "in_progress" {
-				continue // Skip completed jobs
+		for j, job := range jobs {
+			log.Printf("   🔍 Job %d/%d: ID=%d, Status=%s, Labels=%v", 
+				j+1, len(jobs), job.ID, job.Status, job.Labels)
+
+			// For debugging, also check if RunsOn field has data
+			if len(job.RunsOn) > 0 {
+				log.Printf("   📌 Job %d also has RunsOn field: %v", job.ID, job.RunsOn)
 			}
 
-			// Check if job's required labels match our configured labels
-			if c.labelsMatch(job.RunsOn, configuredLabels) || c.labelsMatch(job.Labels, configuredLabels) {
+			// Only check jobs that are waiting for a runner (not yet assigned)
+			if job.Status != "queued" && job.Status != "waiting" {
+				log.Printf("   ⏭️  Skipping job %d with status: %s", job.ID, job.Status)
+				continue
+			}
+
+			// Check if job's required labels are compatible with our configured labels
+			jobLabels := job.Labels
+			if len(jobLabels) == 0 && len(job.RunsOn) > 0 {
+				jobLabels = job.RunsOn // Fallback to RunsOn if Labels is empty
+			}
+
+			log.Printf("   🏷️  Checking if job labels %v match configured %v", jobLabels, configuredLabels)
+			
+			if c.labelsMatch(jobLabels, configuredLabels) {
+				log.Printf("   ✅ Job %d matches! Required: %v, Available: %v", job.ID, jobLabels, configuredLabels)
 				hasMatchingJob = true
 				break
+			} else {
+				log.Printf("   ❌ Job %d doesn't match. Required: %v, Available: %v", job.ID, jobLabels, configuredLabels)
 			}
 		}
 
 		if hasMatchingJob {
 			workflow.Jobs = jobs // Store jobs for reference
 			matchingWorkflows = append(matchingWorkflows, workflow)
+			log.Printf("✅ Workflow %d added to matching list", workflow.ID)
+		} else {
+			log.Printf("❌ Workflow %d has no matching jobs", workflow.ID)
 		}
 	}
 
-	log.Printf("🔍 Filtered %d/%d workflows that match configured labels %v", 
+	log.Printf("🎯 Final result: Filtered %d/%d workflows that match configured labels %v", 
 		len(matchingWorkflows), len(workflows), configuredLabels)
 	
 	return matchingWorkflows, nil
 }
 
-// labelsMatch checks if required labels are compatible with configured labels
-func (c *GHEClient) labelsMatch(requiredLabels, configuredLabels []string) bool {
-	if len(requiredLabels) == 0 {
-		// If no specific labels required, assume it can run on any self-hosted runner
-		return contains(configuredLabels, "self-hosted")
+// labelsMatch checks if job's required labels are compatible with runner's configured labels
+// Job can run on the runner if the runner has ALL the labels that the job requires
+func (c *GHEClient) labelsMatch(jobRequiredLabels, runnerConfiguredLabels []string) bool {
+	if len(jobRequiredLabels) == 0 {
+		// If no specific labels required, job can run on any self-hosted runner
+		log.Printf("   🟡 Job has no specific label requirements, checking for self-hosted")
+		return contains(runnerConfiguredLabels, "self-hosted")
 	}
 
-	// Check if all required labels are present in configured labels
-	for _, required := range requiredLabels {
-		if !contains(configuredLabels, required) {
+	log.Printf("   🔍 Checking if runner labels %v contain all required job labels %v", 
+		runnerConfiguredLabels, jobRequiredLabels)
+
+	// Check if runner has ALL the labels that the job requires
+	for _, requiredLabel := range jobRequiredLabels {
+		if !contains(runnerConfiguredLabels, requiredLabel) {
+			log.Printf("   ❌ Runner missing required label: %s", requiredLabel)
 			return false
 		}
+		log.Printf("   ✅ Runner has required label: %s", requiredLabel)
 	}
 
+	log.Printf("   🎉 Runner has all required labels!")
 	return true
 }
 
