@@ -378,33 +378,37 @@ type ActionsServiceAdminConnection struct {
 }
 
 func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Context, regToken string) (*ActionsServiceAdminConnection, error) {
-	path := "/api/v3/actions/runner-groups/1/runners/registration-token"
-	url := fmt.Sprintf("%s%s", c.baseURL, path)
-	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	apiURL := fmt.Sprintf("%s/api/v3", c.baseURL)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
-	req.Header.Set("Authorization", fmt.Sprintf("RemoteAuth %s", regToken))
-	req.Header.Set("Content-Type", "application/json")
-	
+
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to get admin connection: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseErrorResponse(resp)
 	}
-	
-	var conn ActionsServiceAdminConnection
-	if err := json.NewDecoder(resp.Body).Decode(&conn); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-	
-	return &conn, nil
+
+	var adminConn ActionsServiceAdminConnection
+	if err := json.Unmarshal(body, &adminConn); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal admin connection: %w", err)
+	}
+
+	return &adminConn, nil
 }
 
 func (c *ActionsServiceClient) createRunnerScaleSet(ctx context.Context, scaleSet *RunnerScaleSet) (*RunnerScaleSet, error) {
