@@ -201,8 +201,33 @@ func (s *GHAListenerScaler) scaleBasedOnStatistics(ctx context.Context, stats *R
 		"idleRunners", stats.TotalIdleRunners,
 	)
 	
-	// Calculate required runners based on pending jobs
-	pendingJobs := stats.TotalAvailableJobs + stats.TotalAssignedJobs
+	// In fallback mode, also check for acquirable jobs directly
+	additionalJobs := 0
+	if strings.Contains(s.actionsClient.actionsTokenURL, s.actionsClient.baseURL) && 
+	   s.actionsClient.adminToken == s.actionsClient.token {
+		s.logger.Info("Fallback mode: checking for acquirable jobs directly")
+		
+		jobList, err := s.actionsClient.GetAcquirableJobs(ctx, s.config.RunnerScaleSetID)
+		if err != nil {
+			s.logger.Error(err, "Failed to get acquirable jobs in fallback mode")
+		} else {
+			additionalJobs = jobList.Count
+			s.logger.Info("Found acquirable jobs via fallback", "jobCount", additionalJobs)
+			
+			// Process each job to trigger scaling
+			for _, job := range jobList.Jobs {
+				s.logger.Info("Found pending job",
+					"repository", job.RepositoryName,
+					"owner", job.OwnerName,
+					"workflowRef", job.JobWorkflowRef,
+					"labels", job.RequestLabels,
+				)
+			}
+		}
+	}
+	
+	// Calculate required runners based on pending jobs (including fallback jobs)
+	pendingJobs := stats.TotalAvailableJobs + stats.TotalAssignedJobs + additionalJobs
 	
 	// Calculate desired runner count
 	desiredRunners := pendingJobs
@@ -225,6 +250,7 @@ func (s *GHAListenerScaler) scaleBasedOnStatistics(ctx context.Context, stats *R
 	
 	s.logger.Info("Scaling decision",
 		"pendingJobs", pendingJobs,
+		"additionalJobs", additionalJobs,
 		"currentRunners", currentRunners,
 		"desiredRunners", desiredRunners,
 		"minRunners", s.config.MinRunners,

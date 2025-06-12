@@ -415,14 +415,97 @@ func (c *ActionsServiceClient) GetAcquirableJobs(ctx context.Context, scaleSetID
 func (c *ActionsServiceClient) getAcquirableJobsFallback(ctx context.Context) (*AcquirableJobList, error) {
 	c.logger.Info("Using GitHub API fallback to get workflow runs")
 	
-	// This is a simplified approach - in a real implementation you'd need to:
+	// For demonstration, let's check workflow runs in the organization
+	// This is a simplified approach - you could enhance this to:
 	// 1. Get all repositories in the organization
 	// 2. Check each repository for queued/in_progress workflow runs
 	// 3. Filter by runner labels
 	
-	// For now, return empty list to prevent errors
-	// The scaling logic will rely on periodic checks rather than real-time events
-	return &AcquirableJobList{Count: 0, Jobs: []AcquirableJob{}}, nil
+	// For now, let's make a simple API call to get organization workflow runs
+	// Note: GitHub doesn't have a direct org-level workflow runs API, so we'll simulate
+	
+	jobs := []AcquirableJob{}
+	
+	// Since we can't easily get all org workflow runs, we'll check a known repository
+	// In a real implementation, you'd iterate through all repos
+	testRepoURL := fmt.Sprintf("%s/api/v3/repos/TelenorSweden/test-spot-runner/actions/runs", c.baseURL)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", testRepoURL, nil)
+	if err != nil {
+		c.logger.Error(err, "Failed to create workflow runs request")
+		return &AcquirableJobList{Count: 0, Jobs: jobs}, nil
+	}
+	
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	
+	// Add query parameters to get only queued and in_progress runs
+	q := req.URL.Query()
+	q.Add("status", "queued")
+	q.Add("per_page", "10")
+	req.URL.RawQuery = q.Encode()
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.logger.Error(err, "Failed to get workflow runs")
+		return &AcquirableJobList{Count: 0, Jobs: jobs}, nil
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		c.logger.Info("Failed to get workflow runs", "statusCode", resp.StatusCode)
+		return &AcquirableJobList{Count: 0, Jobs: jobs}, nil
+	}
+	
+	var workflowRuns struct {
+		TotalCount   int `json:"total_count"`
+		WorkflowRuns []struct {
+			ID          int64  `json:"id"`
+			Name        string `json:"name"`
+			Status      string `json:"status"`
+			Conclusion  string `json:"conclusion"`
+			HeadBranch  string `json:"head_branch"`
+			WorkflowID  int64  `json:"workflow_id"`
+			Repository  struct {
+				Name     string `json:"name"`
+				FullName string `json:"full_name"`
+				Owner    struct {
+					Login string `json:"login"`
+				} `json:"owner"`
+			} `json:"repository"`
+		} `json:"workflow_runs"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&workflowRuns); err != nil {
+		c.logger.Error(err, "Failed to decode workflow runs response")
+		return &AcquirableJobList{Count: 0, Jobs: jobs}, nil
+	}
+	
+	c.logger.Info("Found workflow runs", 
+		"totalCount", workflowRuns.TotalCount,
+		"runs", len(workflowRuns.WorkflowRuns))
+	
+	// Convert workflow runs to acquirable jobs
+	for _, run := range workflowRuns.WorkflowRuns {
+		if run.Status == "queued" || run.Status == "in_progress" {
+			job := AcquirableJob{
+				AcquireJobURL:   fmt.Sprintf("%s/jobs/%d/acquire", c.baseURL, run.ID),
+				MessageType:     "JobAvailable",
+				RunnerRequestID: run.ID,
+				RepositoryName:  run.Repository.Name,
+				OwnerName:       run.Repository.Owner.Login,
+				JobWorkflowRef:  fmt.Sprintf("%s@refs/heads/%s", run.Repository.FullName, run.HeadBranch),
+				EventName:       "workflow_dispatch", // Default
+				RequestLabels:   []string{"self-hosted", "linux", "x64", "ghalistener-managed"}, // Assume our labels
+			}
+			jobs = append(jobs, job)
+		}
+	}
+	
+	c.logger.Info("Created acquirable jobs from workflow runs", "jobCount", len(jobs))
+	
+	return &AcquirableJobList{Count: len(jobs), Jobs: jobs}, nil
 }
 
 // CreateMessageSession creates a session for receiving real-time messages
