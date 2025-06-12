@@ -82,6 +82,12 @@ variable "runner_instance_type" {
   default     = "t3.medium"
 }
 
+variable "runner_ami_id" {
+  description = "AMI ID for runner instances (with pre-installed GitHub Actions runner)"
+  type        = string
+  default     = "ami-00841acd225d6edb8"
+}
+
 variable "spot_price" {
   description = "Maximum spot price for runner instances"
   type        = string

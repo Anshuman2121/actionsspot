@@ -9,11 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
-
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 )
@@ -154,29 +151,29 @@ func main() {
 	logger := zapr.NewLogger(zapLogger)
 	
 	// Load configuration
-	config, err := LoadConfig()
+	cfg, err := LoadConfig()
 	if err != nil {
 		logger.Error(err, "Failed to load configuration")
 		os.Exit(1)
 	}
 	
-	if err := config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		logger.Error(err, "Configuration validation failed")
 		os.Exit(1)
 	}
 	
 	logger.Info("Starting GitHub Actions Listener EC2 Scaler",
-		"scaleSetID", config.RunnerScaleSetID,
-		"scaleSetName", config.RunnerScaleSetName,
-		"organization", config.OrganizationName,
-		"minRunners", config.MinRunners,
-		"maxRunners", config.MaxRunners,
-		"runnerLabels", config.RunnerLabels,
+		"scaleSetID", cfg.RunnerScaleSetID,
+		"scaleSetName", cfg.RunnerScaleSetName,
+		"organization", cfg.OrganizationName,
+		"minRunners", cfg.MinRunners,
+		"maxRunners", cfg.MaxRunners,
+		"runnerLabels", cfg.RunnerLabels,
 	)
 	
 	// Initialize AWS clients
 	ctx := context.Background()
-	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithRegion(config.AWSRegion))
+	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.AWSRegion))
 	if err != nil {
 		logger.Error(err, "Failed to load AWS configuration")
 		os.Exit(1)
@@ -185,7 +182,7 @@ func main() {
 	ec2Client := ec2.NewFromConfig(awsConfig)
 	
 	// Create the scaler service
-	scaler, err := NewGHAListenerScaler(ctx, config, ec2Client, logger)
+	scaler, err := NewGHAListenerScaler(ctx, cfg, ec2Client, logger)
 	if err != nil {
 		logger.Error(err, "Failed to create scaler service")
 		os.Exit(1)

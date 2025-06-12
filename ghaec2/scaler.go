@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -395,10 +396,8 @@ func (s *GHAListenerScaler) createRunner(ctx context.Context) error {
 			ImageId:      aws.String(s.config.EC2AMI),
 			InstanceType: types.InstanceType(s.config.EC2InstanceType),
 			KeyName:      aws.String(s.config.EC2KeyPairName),
-			SecurityGroups: []types.GroupIdentifier{
-				{
-					GroupId: aws.String(s.config.EC2SecurityGroupID),
-				},
+			SecurityGroupIds: []string{
+				s.config.EC2SecurityGroupID,
 			},
 			SubnetId: aws.String(s.config.EC2SubnetID),
 			UserData: aws.String(encodedUserData),
@@ -447,26 +446,12 @@ func (s *GHAListenerScaler) createRunner(ctx context.Context) error {
 
 // generateUserDataScript generates the user data script for runner instances
 func (s *GHAListenerScaler) generateUserDataScript(runnerName string) string {
+	// Get registration token - this will need to be implemented
+	// For now, using placeholder that will be replaced with actual token
+	runnerLabelsStr := fmt.Sprintf("%s", strings.Join(s.config.RunnerLabels, ","))
+	
 	script := fmt.Sprintf(`#!/bin/bash
-set -e
-
-# Update system
-apt-get update
-apt-get install -y curl wget jq
-
-# Create runner directory
-mkdir -p /opt/actions-runner
-cd /opt/actions-runner
-
-# Download GitHub Actions runner
-RUNNER_VERSION="2.311.0"
-wget -O actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
-  https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
-tar xzf actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
-rm actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
-
-# Install dependencies
-./bin/installdependencies.sh
+cd /actions-runner
 
 # Get registration token
 REGISTRATION_TOKEN=$(curl -s -X POST \
@@ -474,18 +459,13 @@ REGISTRATION_TOKEN=$(curl -s -X POST \
   -H "Accept: application/vnd.github.v3+json" \
   %s/api/v3/orgs/%s/actions/runners/registration-token | jq -r .token)
 
-# Configure runner
-./config.sh \
-  --url %s/%s \
-  --token $REGISTRATION_TOKEN \
-  --name %s \
-  --labels %s \
-  --work _work \
-  --unattended \
-  --replace
+# Set up the runner
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh --url %s/%s --token $REGISTRATION_TOKEN --name %s --labels %s --ephemeral --runnergroup SpotInstances --work _work --replace
 
-# Install as service
+# Install the runner as a service
 ./svc.sh install
+
+# Start the runner
 ./svc.sh start
 
 echo "Runner %s started successfully"
@@ -496,7 +476,7 @@ echo "Runner %s started successfully"
 		s.config.GitHubEnterpriseURL,
 		s.config.OrganizationName,
 		runnerName,
-		fmt.Sprintf("%s", s.config.RunnerLabels),
+		runnerLabelsStr,
 		runnerName,
 	)
 	

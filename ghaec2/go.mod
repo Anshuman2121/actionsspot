@@ -26,4 +26,4 @@ require (
 	github.com/aws/smithy-go v1.19.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-) 
+)

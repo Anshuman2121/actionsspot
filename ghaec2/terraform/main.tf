@@ -17,7 +17,7 @@ data "aws_subnet" "selected" {
   id = var.subnet_id
 }
 
-# Get latest Ubuntu 22.04 LTS AMI
+# Get latest Ubuntu 22.04 LTS AMI for scaler instance
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -178,7 +178,7 @@ locals {
     security_group_id     = aws_security_group.runners.id
     key_pair_name         = local.key_pair_name
     instance_type         = var.runner_instance_type
-    ami_id                = data.aws_ami.ubuntu.id
+    ami_id                = var.runner_ami_id
     spot_price            = var.spot_price
   }))
 }
