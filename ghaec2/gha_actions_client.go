@@ -156,6 +156,66 @@ type ActionsServiceClient struct {
 	actionsServiceURL    string
 	adminToken           string
 	adminTokenExpiry     time.Time
+	config               *GitHubConfig
+}
+
+// GitHubConfig represents the parsed GitHub configuration URL
+type GitHubConfig struct {
+	ConfigURL    *url.URL
+	Scope        GitHubScope
+	Organization string
+	Enterprise   string
+	Repository   string
+}
+
+type GitHubScope string
+
+const (
+	GitHubScopeOrganization GitHubScope = "organization"
+	GitHubScopeEnterprise   GitHubScope = "enterprise"
+	GitHubScopeRepository   GitHubScope = "repository"
+)
+
+// GitHubAPIURL constructs the GitHub API URL for a given path
+func (g *GitHubConfig) GitHubAPIURL(path string) *url.URL {
+	u := *g.ConfigURL
+	// Reset path to just the host, then add API path
+	u.Path = "/api/v3" + path
+	return &u
+}
+
+// ParseGitHubConfigFromURL parses a GitHub configuration URL
+func ParseGitHubConfigFromURL(githubConfigURL string) (*GitHubConfig, error) {
+	u, err := url.Parse(githubConfigURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse github config url: %w", err)
+	}
+
+	config := &GitHubConfig{
+		ConfigURL: u,
+	}
+
+	pathParts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	
+	if len(pathParts) >= 1 {
+		config.Organization = pathParts[0]
+		config.Scope = GitHubScopeOrganization
+	}
+	
+	if len(pathParts) >= 2 {
+		config.Repository = pathParts[1]
+		config.Scope = GitHubScopeRepository
+	}
+
+	return config, nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // NewActionsServiceClient creates a new Actions Service client
@@ -172,9 +232,30 @@ func NewActionsServiceClient(gitHubEnterpriseURL, token string, logger logr.Logg
 	}
 }
 
+// InitializeConfig initializes the GitHub config for the given organization
+func (c *ActionsServiceClient) InitializeConfig(org string) error {
+	// Construct the GitHub config URL for the organization
+	configURL := fmt.Sprintf("%s/%s", c.baseURL, org)
+	
+	config, err := ParseGitHubConfigFromURL(configURL)
+	if err != nil {
+		c.logger.Error(err, "Failed to parse GitHub config URL")
+		return fmt.Errorf("failed to parse GitHub config URL: %w", err)
+	}
+	
+	c.config = config
+	c.logger.Info("GitHub config initialized", "configURL", config.ConfigURL.String())
+	return nil
+}
+
 // Initialize discovers the Actions Service URL and gets admin token
 func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error {
 	c.logger.Info("Initializing Actions Service client", "organization", org)
+	
+	// Initialize the GitHub config for this organization
+	if err := c.InitializeConfig(org); err != nil {
+		return fmt.Errorf("failed to initialize config: %w", err)
+	}
 	
 	// First, verify the token is valid and has proper permissions
 	if err := c.verifyToken(ctx, org); err != nil {
@@ -218,17 +299,18 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 
 // getRegistrationToken gets a registration token from GitHub
 func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org string) (*registrationToken, error) {
-	path := fmt.Sprintf("/api/v3/orgs/%s/actions/runners/registration-token", org)
+	path := fmt.Sprintf("/orgs/%s/actions/runners/registration-token", org)
 	
 	req, err := c.NewGitHubAPIRequest(ctx, "POST", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	
-	// Set authentication headers after creating request
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	c.logger.Info("Registration token request", "url", req.URL.String())
+	
+	// Set authentication headers after creating request (simplified like official implementation)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
 	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -240,9 +322,23 @@ func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org str
 		return nil, c.parseErrorResponse(resp)
 	}
 	
+	// Debug: Read the response body first to see what we're getting
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	
+	c.logger.Info("Registration token response", "statusCode", resp.StatusCode, "contentType", resp.Header.Get("Content-Type"), "bodyLength", len(bodyBytes))
+	
+	// Check if response is HTML (which would indicate an error)
+	bodyStr := string(bodyBytes)
+	if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
+		return nil, fmt.Errorf("registration token endpoint returned HTML instead of JSON. This indicates your GHES version may not support this API endpoint. Response: %s", bodyStr[:min(500, len(bodyStr))])
+	}
+	
 	var token registrationToken
-	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
-		return nil, fmt.Errorf("failed to decode registration token: %w", err)
+	if err := json.Unmarshal(bodyBytes, &token); err != nil {
+		return nil, fmt.Errorf("failed to decode registration token (body: %s): %w", bodyStr[:min(200, len(bodyStr))], err)
 	}
 	
 	return &token, nil
@@ -250,19 +346,13 @@ func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org str
 
 // NewGitHubAPIRequest creates a new GitHub API request (matching official controller pattern)
 func (c *ActionsServiceClient) NewGitHubAPIRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	u, err := url.Parse(c.baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse base URL: %w", err)
-	}
-	
-	u.Path = path
+	u := c.config.GitHubAPIURL(path)
 	
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create new GitHub API request: %w", err)
 	}
 	
-	// Only set User-Agent header like the official controller
 	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
 	
 	return req, nil
@@ -277,7 +367,7 @@ func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Cont
 		Url         string `json:"url"`
 		RunnerEvent string `json:"runner_event"`
 	}{
-		Url:         fmt.Sprintf("%s/%s", c.baseURL, org), // GitHub config URL (org scope)
+		Url:         c.config.ConfigURL.String(), // Use proper config URL like official implementation
 		RunnerEvent: "register",
 	}
 	
@@ -504,15 +594,24 @@ func (c *ActionsServiceClient) CreateMessageSession(ctx context.Context, scaleSe
 
 // GetMessage polls for new messages from the message queue
 func (c *ActionsServiceClient) GetMessage(ctx context.Context, messageQueueURL, accessToken string, lastMessageID int64, maxCapacity int) (*RunnerScaleSetMessage, error) {
-	params := url.Values{}
+	// Parse the existing URL to properly add query parameters
+	u, err := url.Parse(messageQueueURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse message queue URL: %w", err)
+	}
+	
+	// Get existing query parameters
+	params := u.Query()
 	params.Set("lastMessageId", fmt.Sprintf("%d", lastMessageID))
 	if maxCapacity > 0 {
 		params.Set("runnerCapacity", fmt.Sprintf("%d", maxCapacity))
 	}
 	
-	url := fmt.Sprintf("%s?%s", messageQueueURL, params.Encode())
+	// Update the URL with the new parameters
+	u.RawQuery = params.Encode()
+	finalURL := u.String()
 	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -644,16 +743,15 @@ func (c *ActionsServiceClient) verifyToken(ctx context.Context, org string) erro
 	c.logger.Info("Verifying GitHub token permissions", "organization", org)
 	
 	// Test 1: Check if token can access the API at all
-	path := "/api/v3/user"
+	path := "/user"
 	req, err := c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create user request: %w", err)
 	}
 	
-	// Add authentication headers
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	// Add authentication headers (simplified like official implementation)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
 	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -680,16 +778,15 @@ func (c *ActionsServiceClient) verifyToken(ctx context.Context, org string) erro
 	}
 	
 	// Test 2: Check if token can access the organization
-	path = fmt.Sprintf("/api/v3/orgs/%s", org)
+	path = fmt.Sprintf("/orgs/%s", org)
 	req, err = c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create org request: %w", err)
 	}
 	
-	// Add authentication headers
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	// Add authentication headers (simplified like official implementation)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
 	
 	resp, err = c.httpClient.Do(req)
 	if err != nil {
@@ -709,16 +806,15 @@ func (c *ActionsServiceClient) verifyToken(ctx context.Context, org string) erro
 	c.logger.Info("Token has access to organization", "organization", org)
 	
 	// Test 3: Check if token has Actions permissions
-	path = fmt.Sprintf("/api/v3/orgs/%s/actions/permissions", org)
+	path = fmt.Sprintf("/orgs/%s/actions/permissions", org)
 	req, err = c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create actions permissions request: %w", err)
 	}
 	
-	// Add authentication headers
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	// Add authentication headers (simplified like official implementation)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
 	
 	resp, err = c.httpClient.Do(req)
 	if err != nil {

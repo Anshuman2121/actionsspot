@@ -87,7 +87,7 @@ func (s *MessageQueueScaler) Run(ctx context.Context) error {
 	}
 	defer s.cleanupSession(ctx)
 	
-	// Handle initial statistics and start message polling loop
+	// Handle initial statistics and start message polling loop (like Listener.Listen)
 	return s.startMessagePolling(ctx)
 }
 
@@ -104,6 +104,7 @@ func (s *MessageQueueScaler) initializeActionsService(ctx context.Context) error
 	
 	return nil
 }
+
 
 // initializeScaleSet creates or gets the runner scale set (like autoscalingrunnerset_controller.go)
 func (s *MessageQueueScaler) initializeScaleSet(ctx context.Context) error {
@@ -150,27 +151,37 @@ func (s *MessageQueueScaler) createMessageSession(ctx context.Context) error {
 	return nil
 }
 
-// startMessagePolling starts the message polling loop (like Listener.Listen)
+// startMessagePolling starts the message polling loop (exactly like Listener.Listen)
 func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
-	// Handle initial statistics (like Listener.Listen does)
-	if s.session.Statistics != nil {
-		s.logger.Info("Initial statistics",
-			"availableJobs", s.session.Statistics.TotalAvailableJobs,
-			"assignedJobs", s.session.Statistics.TotalAssignedJobs,
-			"runningJobs", s.session.Statistics.TotalRunningJobs,
-			"registeredRunners", s.session.Statistics.TotalRegisteredRunners,
-			"busyRunners", s.session.Statistics.TotalBusyRunners,
-			"idleRunners", s.session.Statistics.TotalIdleRunners,
-		)
-		
-		// Scale based on initial statistics
-		_, err := s.handleDesiredRunnerCount(ctx, s.session.Statistics.TotalAssignedJobs, 0)
-		if err != nil {
-			s.logger.Error(err, "Failed to handle initial desired runner count")
-		}
+	// Handle initial message with statistics (exactly like Listener.Listen does)
+	initialMessage := &RunnerScaleSetMessage{
+		MessageID:   0,
+		MessageType: "RunnerScaleSetJobMessages",
+		Statistics:  s.session.Statistics,
+		Body:        "",
 	}
+
+	if s.session.Statistics == nil {
+		return fmt.Errorf("session statistics is nil")
+	}
+
+	s.logger.Info("Initial runner scale set statistics",
+		"availableJobs", s.session.Statistics.TotalAvailableJobs,
+		"assignedJobs", s.session.Statistics.TotalAssignedJobs,
+		"runningJobs", s.session.Statistics.TotalRunningJobs,
+		"registeredRunners", s.session.Statistics.TotalRegisteredRunners,
+		"busyRunners", s.session.Statistics.TotalBusyRunners,
+		"idleRunners", s.session.Statistics.TotalIdleRunners,
+	)
 	
-	// Start the message polling loop (like Listener.Listen)
+	// Handle initial desired runner count (like Listener.Listen)
+	desiredRunners, err := s.handleDesiredRunnerCount(ctx, initialMessage.Statistics.TotalAssignedJobs, 0)
+	if err != nil {
+		return fmt.Errorf("handling initial message failed: %w", err)
+	}
+	s.logger.Info("Initial desired runners calculated", "desiredRunners", desiredRunners)
+	
+	// Start the message polling loop (exactly like Listener.Listen)
 	s.logger.Info("Starting message polling loop")
 	
 	for {
@@ -187,7 +198,7 @@ func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
 		}
 
 		if msg == nil {
-			// No new messages - handle as null message
+			// No new messages - handle as null message (like Listener.Listen)
 			_, err := s.handleDesiredRunnerCount(ctx, 0, 0)
 			if err != nil {
 				return fmt.Errorf("handling nil message failed: %w", err)
@@ -196,7 +207,8 @@ func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
 		}
 
 		// Handle the message (like Listener.handleMessage)
-		if err := s.handleMessage(ctx, msg); err != nil {
+		// Use context.WithoutCancel to avoid cancelling message handling
+		if err := s.handleMessage(context.WithoutCancel(ctx), msg); err != nil {
 			return fmt.Errorf("failed to handle message: %w", err)
 		}
 	}
