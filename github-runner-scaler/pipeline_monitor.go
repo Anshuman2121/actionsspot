@@ -35,15 +35,27 @@ func (pm *PipelineMonitor) CheckPendingPipelines(ctx context.Context) (*Pipeline
 	log.Printf("🔍 Checking for pending pipelines...")
 
 	// Get queued workflows
-	queuedRuns, err := pm.gheClient.GetQueuedWorkflowRuns(ctx)
+	allQueuedRuns, err := pm.gheClient.GetQueuedWorkflowRuns(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get queued workflows: %w", err)
 	}
 
+	// Filter workflows that match our configured runner labels
+	queuedRuns, err := pm.gheClient.FilterWorkflowsMatchingLabels(ctx, allQueuedRuns.WorkflowRuns, pm.config.RunnerLabels)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter matching workflows: %w", err)
+	}
+
 	// Get running workflows
-	runningRuns, err := pm.gheClient.GetRunningWorkflowRuns(ctx)
+	allRunningRuns, err := pm.gheClient.GetRunningWorkflowRuns(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get running workflows: %w", err)
+	}
+
+	// Filter running workflows that match our configured runner labels
+	runningRuns, err := pm.gheClient.FilterWorkflowsMatchingLabels(ctx, allRunningRuns.WorkflowRuns, pm.config.RunnerLabels)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter running workflows: %w", err)
 	}
 
 	// Get current runners
@@ -52,11 +64,22 @@ func (pm *PipelineMonitor) CheckPendingPipelines(ctx context.Context) (*Pipeline
 		return nil, fmt.Errorf("failed to get runners: %w", err)
 	}
 
-	// Analyze the situation
-	status := pm.analyzePipelineStatus(queuedRuns, runningRuns, runners)
+	// Create filtered workflow run lists for analysis
+	filteredQueuedRuns := &WorkflowRunsList{
+		TotalCount:   len(queuedRuns),
+		WorkflowRuns: queuedRuns,
+	}
+	filteredRunningRuns := &WorkflowRunsList{
+		TotalCount:   len(runningRuns),
+		WorkflowRuns: runningRuns,
+	}
 
-	log.Printf("📊 Pipeline Status: Queued=%d, Running=%d, Available Runners=%d, Busy Runners=%d", 
-		len(status.QueuedPipelines), len(status.RunningPipelines), 
+	// Analyze the situation
+	status := pm.analyzePipelineStatus(filteredQueuedRuns, filteredRunningRuns, runners)
+
+	log.Printf("📊 Pipeline Status: Total Queued=%d, Matching Queued=%d, Total Running=%d, Matching Running=%d, Available Runners=%d, Busy Runners=%d", 
+		allQueuedRuns.TotalCount, len(status.QueuedPipelines), 
+		allRunningRuns.TotalCount, len(status.RunningPipelines),
 		len(status.AvailableRunners), len(status.BusyRunners))
 
 	return status, nil

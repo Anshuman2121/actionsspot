@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"time"
 	"strings"
+	"time"
 )
 
 const (
@@ -50,6 +51,14 @@ type WorkflowRun struct {
 	Conclusion string `json:"conclusion"` // success, failure, cancelled
 	RunnerName string `json:"runner_name,omitempty"`
 	Repository *Repository `json:"repository,omitempty"`
+	Jobs       []WorkflowJob `json:"jobs,omitempty"` // Jobs with runner requirements
+}
+
+type WorkflowJob struct {
+	ID       int      `json:"id"`
+	Status   string   `json:"status"`
+	RunsOn   []string `json:"runs_on,omitempty"` // Runner labels required by this job
+	Labels   []string `json:"labels,omitempty"`  // Alternative field name
 }
 
 type Repository struct {
@@ -235,6 +244,31 @@ func (c *GHEClient) getRepositoryWorkflowRuns(ctx context.Context, owner, repo, 
 	return &runs, nil
 }
 
+// GetWorkflowJobs gets jobs for a specific workflow run
+func (c *GHEClient) GetWorkflowJobs(ctx context.Context, owner, repo string, runID int) ([]WorkflowJob, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs", c.baseURL, owner, repo, runID)
+	
+	resp, err := c.makeRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get workflow jobs (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var response struct {
+		Jobs []WorkflowJob `json:"jobs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return response.Jobs, nil
+}
+
 // GetRegistrationToken gets a new runner registration token
 func (c *GHEClient) GetRegistrationToken(ctx context.Context) (*RegistrationToken, error) {
 	url := fmt.Sprintf("%s/orgs/%s/actions/runners/registration-token", c.baseURL, c.config.OrganizationName)
@@ -343,4 +377,73 @@ type RunnerDemandAnalysis struct {
 	IdleRunners    int `json:"idle_runners"`
 	QueuedJobs     int `json:"queued_jobs"`
 	EstimatedNeed  int `json:"estimated_need"`
+}
+
+// FilterWorkflowsMatchingLabels filters workflow runs to only include those that match the configured runner labels
+func (c *GHEClient) FilterWorkflowsMatchingLabels(ctx context.Context, workflows []WorkflowRun, configuredLabels []string) ([]WorkflowRun, error) {
+	var matchingWorkflows []WorkflowRun
+
+	for _, workflow := range workflows {
+		if workflow.Repository == nil {
+			continue
+		}
+
+		// Get jobs for this workflow
+		jobs, err := c.GetWorkflowJobs(ctx, workflow.Repository.Owner.Login, workflow.Repository.Name, workflow.ID)
+		if err != nil {
+			log.Printf("Warning: failed to get jobs for workflow %d in %s: %v", workflow.ID, workflow.Repository.FullName, err)
+			continue
+		}
+
+		// Check if any job requires labels that match our configured labels
+		hasMatchingJob := false
+		for _, job := range jobs {
+			if job.Status != "queued" && job.Status != "in_progress" {
+				continue // Skip completed jobs
+			}
+
+			// Check if job's required labels match our configured labels
+			if c.labelsMatch(job.RunsOn, configuredLabels) || c.labelsMatch(job.Labels, configuredLabels) {
+				hasMatchingJob = true
+				break
+			}
+		}
+
+		if hasMatchingJob {
+			workflow.Jobs = jobs // Store jobs for reference
+			matchingWorkflows = append(matchingWorkflows, workflow)
+		}
+	}
+
+	log.Printf("🔍 Filtered %d/%d workflows that match configured labels %v", 
+		len(matchingWorkflows), len(workflows), configuredLabels)
+	
+	return matchingWorkflows, nil
+}
+
+// labelsMatch checks if required labels are compatible with configured labels
+func (c *GHEClient) labelsMatch(requiredLabels, configuredLabels []string) bool {
+	if len(requiredLabels) == 0 {
+		// If no specific labels required, assume it can run on any self-hosted runner
+		return contains(configuredLabels, "self-hosted")
+	}
+
+	// Check if all required labels are present in configured labels
+	for _, required := range requiredLabels {
+		if !contains(configuredLabels, required) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// contains checks if a slice contains a specific string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 } 
