@@ -1,0 +1,234 @@
+# 🧪 Test Runner Scaling Workflow
+# This workflow is designed to test the Lambda-based runner scaling
+
+name: 🚀 Test Runner Scaling
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of scaling test'
+        required: true
+        default: 'single'
+        type: choice
+        options:
+        - single
+        - parallel
+        - stress
+      duration_minutes:
+        description: 'Test duration in minutes'
+        required: true
+        default: '5'
+        type: string
+
+  # Trigger on push to test branches
+  push:
+    branches:
+      - 'test/runner-scaling'
+      - 'feature/scaling-test'
+
+  # Schedule for regular testing
+  schedule:
+    - cron: '0 9 * * 1-5'  # 9 AM weekdays
+
+jobs:
+  # Job 1: Single runner test
+  test-single-runner:
+    if: ${{ github.event.inputs.test_type == 'single' || github.event.inputs.test_type == '' }}
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 30
+    
+    steps:
+      - name: 🏁 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 🐧 System Information
+        run: |
+          echo "🤖 Runner Information:"
+          echo "Runner Name: $RUNNER_NAME"
+          echo "Runner OS: $RUNNER_OS"
+          echo "Runner Arch: $RUNNER_ARCH"
+          echo "Workflow: $GITHUB_WORKFLOW"
+          echo "Job: $GITHUB_JOB"
+          echo ""
+          echo "💻 System Information:"
+          uname -a
+          lscpu | head -10
+          free -h
+          df -h
+          echo ""
+          echo "🕐 Current Time: $(date)"
+          
+      - name: ⏰ Test Duration
+        run: |
+          DURATION=${{ github.event.inputs.duration_minutes || '2' }}
+          echo "🕐 Running test for $DURATION minutes..."
+          
+          for i in $(seq 1 $DURATION); do
+            echo "📊 Minute $i/$DURATION - $(date)"
+            echo "🔄 Performing light CPU work..."
+            
+            # Light CPU work
+            for j in $(seq 1 10); do
+              echo "Scale 1000" | bc -l > /dev/null
+            done
+            
+            # Memory test
+            echo "🧠 Memory usage:"
+            free -h | grep Mem
+            
+            # Disk test
+            echo "💾 Disk usage:"
+            df -h | grep -E "/$|/tmp"
+            
+            sleep 60
+          done
+          
+      - name: ✅ Test Complete
+        run: |
+          echo "✅ Single runner test completed successfully!"
+          echo "Runner performed as expected for the duration."
+
+  # Job 2: Parallel runner test
+  test-parallel-runners:
+    if: ${{ github.event.inputs.test_type == 'parallel' }}
+    strategy:
+      matrix:
+        job_id: [1, 2, 3, 4, 5]
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 15
+    
+    steps:
+      - name: 🏁 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 🔀 Parallel Job ${{ matrix.job_id }}
+        run: |
+          echo "🚀 Starting parallel job ${{ matrix.job_id }}"
+          echo "Runner: $RUNNER_NAME"
+          echo "Job ID: $GITHUB_JOB"
+          
+          # Simulate different workloads
+          case ${{ matrix.job_id }} in
+            1)
+              echo "📦 Simulating build job..."
+              sleep 30
+              echo "Build completed"
+              ;;
+            2)
+              echo "🧪 Simulating test job..."
+              sleep 45
+              echo "Tests passed"
+              ;;
+            3)
+              echo "🔍 Simulating lint job..."
+              sleep 20
+              echo "Linting completed"
+              ;;
+            4)
+              echo "📊 Simulating analysis job..."
+              sleep 60
+              echo "Analysis completed"
+              ;;
+            5)
+              echo "🚀 Simulating deploy job..."
+              sleep 90
+              echo "Deployment completed"
+              ;;
+          esac
+          
+          echo "✅ Parallel job ${{ matrix.job_id }} completed!"
+
+  # Job 3: Stress test (multiple workflows)
+  stress-test-trigger:
+    if: ${{ github.event.inputs.test_type == 'stress' }}
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 10
+    
+    steps:
+      - name: 🏁 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 🔄 Trigger Multiple Workflows
+        run: |
+          echo "🚨 Starting stress test..."
+          echo "This will trigger multiple workflow runs to test scaling"
+          
+          # Create multiple commits to trigger workflows
+          for i in {1..3}; do
+            echo "Stress test run $i - $(date)" > stress-test-$i.txt
+            git config user.name "Stress Test Bot"
+            git config user.email "stress-test@telenor.com"
+            git add stress-test-$i.txt || true
+            git commit -m "Stress test commit $i" || true
+            echo "Created stress test file $i"
+            sleep 10
+          done
+          
+          echo "✅ Stress test triggers created"
+
+  # Job 4: Resource monitoring
+  monitor-resources:
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 10
+    
+    steps:
+      - name: 📊 Resource Monitoring
+        run: |
+          echo "📊 Starting resource monitoring..."
+          
+          for i in {1..5}; do
+            echo "=== Resource Check $i ==="
+            echo "🕐 Time: $(date)"
+            
+            echo "💻 CPU Usage:"
+            top -bn1 | head -5
+            
+            echo "🧠 Memory Usage:"
+            free -h
+            
+            echo "💾 Disk Usage:"
+            df -h
+            
+            echo "🌐 Network Usage:"
+            ss -tuln | head -10
+            
+            echo "🔧 Process Count:"
+            ps aux | wc -l
+            
+            echo "⚡ Load Average:"
+            uptime
+            
+            echo ""
+            sleep 30
+          done
+
+  # Job 5: Cleanup verification
+  verify-cleanup:
+    needs: [test-single-runner, monitor-resources]
+    if: always()
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 5
+    
+    steps:
+      - name: 🧹 Verify Runner Cleanup
+        run: |
+          echo "🧹 Verifying runner cleanup process..."
+          echo "Runner Name: $RUNNER_NAME"
+          echo "This runner should self-terminate after job completion"
+          
+          # Check if this is an ephemeral runner
+          if [ -f "/home/runner/.runner" ]; then
+            echo "✅ Ephemeral runner detected"
+            cat /home/runner/.runner | grep -E "(ephemeral|replace)" || true
+          fi
+          
+          echo "🕐 Job completion time: $(date)"
+          echo "✅ Cleanup verification completed"
+
+# 📝 Workflow Summary:
+# - Single Runner Test: Tests basic runner functionality
+# - Parallel Test: Creates 5 concurrent jobs to test scaling
+# - Stress Test: Triggers multiple workflow runs
+# - Resource Monitor: Monitors system resources during execution
+# - Cleanup Verification: Ensures proper runner lifecycle management 

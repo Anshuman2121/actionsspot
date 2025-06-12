@@ -1,0 +1,176 @@
+# 🔥 Load Test for Runner Scaling
+# This workflow creates multiple parallel jobs to test scaling behavior
+
+name: 🔥 Load Test Runner Scaling
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_count:
+        description: 'Number of parallel jobs to create'
+        required: true
+        default: '8'
+        type: string
+      job_duration:
+        description: 'Duration of each job (minutes)'
+        required: true
+        default: '3'
+        type: string
+
+jobs:
+  # Generate dynamic job matrix based on input
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: 🔧 Generate Job Matrix
+        id: set-matrix
+        run: |
+          JOB_COUNT=${{ github.event.inputs.job_count || '8' }}
+          MATRIX=$(seq 1 $JOB_COUNT | jq -R . | jq -s .)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "🎯 Generated matrix for $JOB_COUNT jobs: $MATRIX"
+
+  # Load test jobs that will queue and trigger scaling
+  load-test:
+    needs: setup
+    strategy:
+      matrix:
+        job_id: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 20  # Allow high parallelism to test scaling
+    runs-on: [self-hosted, linux, x64, lambda-managed]
+    timeout-minutes: 15
+    
+    steps:
+      - name: 🚀 Load Test Job ${{ matrix.job_id }}
+        run: |
+          echo "🔥 Starting load test job ${{ matrix.job_id }}"
+          echo "📊 Job Details:"
+          echo "  - Job ID: ${{ matrix.job_id }}"
+          echo "  - Runner: $RUNNER_NAME"
+          echo "  - Start Time: $(date)"
+          echo "  - Duration: ${{ github.event.inputs.job_duration || '3' }} minutes"
+          
+          # Show system information
+          echo ""
+          echo "💻 System Information:"
+          echo "  - CPU Cores: $(nproc)"
+          echo "  - Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo "  - Load Average: $(uptime | awk -F'load average:' '{print $2}')"
+          
+      - name: 🔄 Simulate Workload
+        run: |
+          DURATION_MINUTES=${{ github.event.inputs.job_duration || '3' }}
+          DURATION_SECONDS=$((DURATION_MINUTES * 60))
+          
+          echo "⏱️  Running workload for $DURATION_MINUTES minutes..."
+          
+          # Simulate CI/CD workload
+          START_TIME=$(date +%s)
+          ITERATION=1
+          
+          while [ $(($(date +%s) - START_TIME)) -lt $DURATION_SECONDS ]; do
+            echo "🔄 Iteration $ITERATION (Job ${{ matrix.job_id }})"
+            
+            # Simulate different CI/CD tasks
+            case $((ITERATION % 4)) in
+              0)
+                echo "  📦 Simulating build phase..."
+                # CPU intensive task
+                for i in {1..10}; do
+                  echo "scale=1000; 4*a(1)" | bc -l > /dev/null
+                done
+                ;;
+              1)
+                echo "  🧪 Simulating test phase..."
+                # Memory allocation task
+                dd if=/dev/zero of=/tmp/test_$$.tmp bs=1M count=10 2>/dev/null
+                rm -f /tmp/test_$$.tmp
+                ;;
+              2)
+                echo "  🔍 Simulating lint phase..."
+                # I/O intensive task
+                find /usr -name "*.so" 2>/dev/null | head -50 > /dev/null
+                ;;
+              3)
+                echo "  📊 Simulating analysis phase..."
+                # Mixed workload
+                ps aux | grep -v grep | wc -l > /dev/null
+                ;;
+            esac
+            
+            # Show progress
+            ELAPSED=$(($(date +%s) - START_TIME))
+            REMAINING=$((DURATION_SECONDS - ELAPSED))
+            echo "  ⏰ Elapsed: ${ELAPSED}s, Remaining: ${REMAINING}s"
+            
+            ITERATION=$((ITERATION + 1))
+            sleep 15
+          done
+
+      - name: 📊 Report Results
+        run: |
+          echo "✅ Load test job ${{ matrix.job_id }} completed!"
+          echo "📊 Final Report:"
+          echo "  - Job ID: ${{ matrix.job_id }}"
+          echo "  - Runner: $RUNNER_NAME"
+          echo "  - End Time: $(date)"
+          echo "  - Total Duration: ${{ github.event.inputs.job_duration || '3' }} minutes"
+          
+          # System state at completion
+          echo ""
+          echo "💻 Final System State:"
+          echo "  - CPU Usage: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)"
+          echo "  - Memory Usage: $(free | grep Mem | awk '{printf "%.1f%%", $3/$2 * 100.0}')"
+          echo "  - Load Average: $(uptime | awk -F'load average:' '{print $2}')"
+          echo "  - Disk Usage: $(df -h / | tail -1 | awk '{print $5}')"
+
+  # Summary job that waits for all load tests to complete
+  summary:
+    needs: [setup, load-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: 📋 Test Summary
+        run: |
+          echo "🏁 Load Test Summary"
+          echo "=================="
+          echo "📊 Test Configuration:"
+          echo "  - Total Jobs: ${{ github.event.inputs.job_count || '8' }}"
+          echo "  - Job Duration: ${{ github.event.inputs.job_duration || '3' }} minutes"
+          echo "  - Test End Time: $(date)"
+          
+          echo ""
+          echo "🎯 Expected Scaling Behavior:"
+          echo "  - Lambda should detect queued jobs"
+          echo "  - New runners should be created within 2-3 minutes"
+          echo "  - Jobs should be distributed across available runners"
+          echo "  - Runners should self-terminate after completion"
+          
+          echo ""
+          echo "📈 Monitoring:"
+          echo "  - Check CloudWatch logs: /aws/lambda/github-runner-scaler"
+          echo "  - Monitor DynamoDB table: github-runners"
+          echo "  - Verify EC2 spot instances creation/termination"
+          
+          echo ""
+          echo "✅ Load test completed!"
+
+# 📝 How to Use This Workflow:
+# 1. Go to Actions tab in your repository
+# 2. Select "Load Test Runner Scaling"
+# 3. Click "Run workflow"
+# 4. Choose:
+#    - job_count: Number of parallel jobs (e.g., 8)
+#    - job_duration: How long each job runs (e.g., 3 minutes)
+# 5. Click "Run workflow"
+#
+# 📊 What This Tests:
+# - Multiple queued jobs trigger Lambda scaling
+# - New runners are created automatically
+# - Jobs are distributed across available runners
+# - Runners self-terminate after completion
+# - System handles concurrent workloads properly 
