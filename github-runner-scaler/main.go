@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -133,6 +134,9 @@ func getEnvOrDefault(key, defaultValue string) string {
 func (aws *AWSInfrastructure) CreateSpotInstance(ctx context.Context, jobID int64, labels []string) (*string, error) {
 	// Generate user data script for runner installation
 	userData := aws.generateUserDataScriptForJob(jobID, labels)
+	
+	// Base64 encode the user data script (required by AWS)
+	userDataEncoded := base64.StdEncoding.EncodeToString([]byte(userData))
 
 	// Spot instance request specification
 	spotPrice := aws.config.EC2SpotPrice
@@ -142,7 +146,7 @@ func (aws *AWSInfrastructure) CreateSpotInstance(ctx context.Context, jobID int6
 		KeyName:          aws.String(aws.config.EC2KeyPairName),
 		SecurityGroupIds: []string{aws.config.EC2SecurityGroupID},
 		SubnetId:         aws.String(aws.config.EC2SubnetID),
-		UserData:         aws.String(userData),
+		UserData:         aws.String(userDataEncoded),
 		Monitoring: &ec2types.RunInstancesMonitoringEnabled{
 			Enabled: aws.Bool(true),
 		},
@@ -198,6 +202,9 @@ func (aws *AWSInfrastructure) CreateSpotInstance(ctx context.Context, jobID int6
 func (aws *AWSInfrastructure) CreateSpotInstanceForPipeline(ctx context.Context, runnerName, registrationToken string, labels []string) (*string, error) {
 	// Generate user data script for runner installation
 	userData := aws.generateUserDataScriptWithToken(runnerName, registrationToken, labels)
+	
+	// Base64 encode the user data script (required by AWS)
+	userDataEncoded := base64.StdEncoding.EncodeToString([]byte(userData))
 
 	// Spot instance request specification
 	spotPrice := aws.config.EC2SpotPrice
@@ -207,7 +214,7 @@ func (aws *AWSInfrastructure) CreateSpotInstanceForPipeline(ctx context.Context,
 		KeyName:          aws.String(aws.config.EC2KeyPairName),
 		SecurityGroupIds: []string{aws.config.EC2SecurityGroupID},
 		SubnetId:         aws.String(aws.config.EC2SubnetID),
-		UserData:         aws.String(userData),
+		UserData:         aws.String(userDataEncoded),
 		Monitoring: &ec2types.RunInstancesMonitoringEnabled{
 			Enabled: aws.Bool(true),
 		},
