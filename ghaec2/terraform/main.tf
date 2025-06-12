@@ -13,49 +13,8 @@ provider "aws" {
 }
 
 # Data sources
-data "aws_vpc" "selected" {
-  count = var.vpc_id != "" ? 1 : 0
-  id    = var.vpc_id
-}
-
-data "aws_vpc" "default" {
-  count   = var.vpc_id == "" ? 1 : 0
-  default = true
-}
-
-locals {
-  vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.default[0].id
-}
-
-data "aws_subnets" "available" {
-  filter {
-    name   = "vpc-id"
-    values = [local.vpc_id]
-  }
-  
-  filter {
-    name   = "map-public-ip-on-launch"
-    values = ["true"]
-  }
-  
-  filter {
-    name   = "state"
-    values = ["available"]
-  }
-}
-
 data "aws_subnet" "selected" {
-  count = var.subnet_id != "" ? 1 : 0
-  id    = var.subnet_id
-}
-
-data "aws_subnet" "first_available" {
-  count = var.subnet_id == "" ? 1 : 0
-  id    = data.aws_subnets.available.ids[0]
-}
-
-locals {
-  subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnet.first_available[0].id
+  id = var.subnet_id
 }
 
 # Get latest Ubuntu 22.04 LTS AMI
@@ -78,7 +37,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_security_group" "scaler" {
   name_prefix = "ghaec2-scaler-"
   description = "Security group for GHAEC2 scaler instance"
-  vpc_id      = local.vpc_id
+  vpc_id      = data.aws_subnet.selected.vpc_id
 
   # Outbound internet access
   egress {
@@ -98,7 +57,7 @@ resource "aws_security_group" "scaler" {
 resource "aws_security_group" "runners" {
   name_prefix = "ghaec2-runners-"
   description = "Security group for GHAEC2 runner instances"
-  vpc_id      = local.vpc_id
+  vpc_id      = data.aws_subnet.selected.vpc_id
 
   # Outbound internet access
   egress {
@@ -215,7 +174,7 @@ locals {
     max_runners           = var.max_runners
     runner_scale_set_name = var.runner_scale_set_name
     aws_region            = var.aws_region
-    subnet_id             = local.subnet_id
+    subnet_id             = var.subnet_id
     security_group_id     = aws_security_group.runners.id
     key_pair_name         = local.key_pair_name
     instance_type         = var.runner_instance_type
@@ -230,7 +189,7 @@ resource "aws_instance" "scaler" {
   instance_type           = var.scaler_instance_type
   key_name               = local.key_pair_name
   vpc_security_group_ids = [aws_security_group.scaler.id]
-  subnet_id              = local.subnet_id
+  subnet_id              = var.subnet_id
   iam_instance_profile   = aws_iam_instance_profile.scaler_profile.name
   
   user_data = local.scaler_user_data

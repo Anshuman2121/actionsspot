@@ -5,16 +5,9 @@ variable "aws_region" {
   default     = "eu-north-1"
 }
 
-variable "vpc_id" {
-  description = "VPC ID to deploy resources in (leave empty to use default VPC)"
-  type        = string
-  default     = ""
-}
-
 variable "subnet_id" {
-  description = "Subnet ID to deploy scaler instance in (leave empty to use first available public subnet)"
+  description = "Subnet ID to deploy scaler instance in"
   type        = string
-  default     = ""
 }
 
 # SSH access removed - using SSM Session Manager instead
