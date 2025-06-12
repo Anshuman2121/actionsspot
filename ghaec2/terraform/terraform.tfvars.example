@@ -1,0 +1,41 @@
+# =============================================================================
+# GHAEC2 Terraform Variables Example
+# Copy this file to terraform.tfvars and fill in your actual values
+# =============================================================================
+
+# AWS Configuration
+aws_region = "eu-north-1"
+
+# VPC and Subnet (optional - leave empty to use defaults)
+# vpc_id    = "vpc-xxxxxxxxx"
+# subnet_id = "subnet-xxxxxxxxx"
+
+# SSH Access (restrict to your IP for security)
+allowed_ssh_cidrs = ["0.0.0.0/0"]  # Change to your IP: ["1.2.3.4/32"]
+
+# Key Pair - Choose one option:
+# Option 1: Use existing key pair
+# key_pair_name = "my-existing-key"
+
+# Option 2: Create new key pair (provide your public key)
+# key_pair_name = ""
+# public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB... your-email@example.com"
+
+# GitHub Configuration
+github_token          = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+github_enterprise_url = "https://TelenorSwedenAB.ghe.com"
+organization_name     = "TelenorSweden"
+
+# Runner Configuration
+runner_labels         = ["self-hosted", "linux", "x64", "ghalistener-managed"]
+min_runners          = 0
+max_runners          = 10
+runner_scale_set_name = "ghaec2-scaler"
+
+# EC2 Configuration
+scaler_instance_type = "t3.medium"   # Instance type for scaler
+runner_instance_type = "t3.medium"   # Instance type for runners
+spot_price          = "0.05"         # Maximum spot price
+
+# Network Configuration
+create_elastic_ip = true  # Recommended for stable SSH access 

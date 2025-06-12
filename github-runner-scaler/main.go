@@ -461,20 +461,122 @@ func Handler(ctx context.Context, event events.CloudWatchEvent) error {
 	// Initialize GitHub Enterprise client
 	gheClient := NewGHEClient(config)
 
-	// Initialize pipeline monitor
-	monitor := NewPipelineMonitor(gheClient, awsInfra, config)
-
-	// Execute pipeline monitoring and scaling
-	if err := monitor.MonitorAndScale(ctx); err != nil {
-		log.Printf("❌ Pipeline monitoring failed: %v", err)
+	// Use CRD-style job analysis (following actions-runner-controller pattern)
+	log.Printf("🎯 Using CRD-style job demand analysis...")
+	crdAnalyzer := NewCRDStyleJobAnalyzer(gheClient, config)
+	
+	jobCount, err := crdAnalyzer.AnalyzeJobDemand(ctx)
+	if err != nil {
+		log.Printf("❌ CRD-style analysis failed, falling back to legacy method: %v", err)
+		
+		// Fallback to original pipeline monitor
+		monitor := NewPipelineMonitor(gheClient, awsInfra, config)
+		if err := monitor.MonitorAndScale(ctx); err != nil {
+			log.Printf("❌ Fallback pipeline monitoring also failed: %v", err)
+			return err
+		}
+		
+		log.Printf("✅ Lambda execution completed successfully using fallback method")
+		return nil
+	}
+	
+	// Execute scaling based on CRD-style analysis
+	if err := executeCRDBasedScaling(ctx, jobCount, gheClient, awsInfra, config); err != nil {
+		log.Printf("❌ CRD-based scaling failed: %v", err)
 		return err
 	}
 
-	log.Printf("✅ Lambda execution completed successfully")
+	log.Printf("✅ Lambda execution completed successfully using CRD-style analysis")
 	return nil
 }
 
-// executeRunnerScaling contains the main logic for checking jobs and scaling runners
+// executeCRDBasedScaling implements scaling based on CRD-style job analysis
+func executeCRDBasedScaling(ctx context.Context, jobCount *JobCount, gheClient *GHEClient, awsInfra *AWSInfrastructure, config Config) error {
+	log.Printf("🎯 Executing CRD-based scaling logic...")
+	log.Printf("📊 Job Analysis: NecessaryReplicas=%d, Queued=%d, InProgress=%d", 
+		jobCount.NecessaryReplicas, jobCount.Queued, jobCount.InProgress)
+	
+	// Get current runners to determine scaling need
+	runners, err := gheClient.GetSelfHostedRunners(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get current runners: %w", err)
+	}
+	
+	// Count current active runners
+	activeRunners := 0
+	idleRunners := 0
+	for _, runner := range runners.Runners {
+		if runner.Status == "online" {
+			activeRunners++
+			if !runner.Busy {
+				idleRunners++
+			}
+		}
+	}
+	
+	log.Printf("📊 Current Runners: Active=%d, Idle=%d, Busy=%d", 
+		activeRunners, idleRunners, activeRunners-idleRunners)
+	
+	// Calculate how many new runners we need (following ARC logic)
+	// We need enough runners to handle queued + in_progress jobs
+	runnersNeeded := jobCount.NecessaryReplicas - activeRunners
+	
+	// Apply max runners constraint
+	if activeRunners + runnersNeeded > config.MaxRunners {
+		runnersNeeded = config.MaxRunners - activeRunners
+		if runnersNeeded < 0 {
+			runnersNeeded = 0
+		}
+	}
+	
+	// Apply min runners constraint
+	if runnersNeeded < 0 && activeRunners > config.MinRunners {
+		// We have too many runners but still respect min runners
+		// Note: We don't implement scale-down in this Lambda (that would be done by the runner lifecycle)
+		runnersNeeded = 0
+	}
+	
+	log.Printf("🎯 Scaling Decision: Need %d new runners (necessary=%d, current=%d, max=%d)", 
+		runnersNeeded, jobCount.NecessaryReplicas, activeRunners, config.MaxRunners)
+	
+	if runnersNeeded <= 0 {
+		log.Printf("✅ No new runners needed - current capacity is sufficient")
+		return nil
+	}
+	
+	// Create the needed runners
+	successCount := 0
+	for i := 0; i < runnersNeeded; i++ {
+		runnerName := fmt.Sprintf("arc-lambda-runner-%d-%d", time.Now().Unix(), i+1)
+		
+		// Get registration token
+		token, err := gheClient.GetRegistrationToken(ctx)
+		if err != nil {
+			log.Printf("❌ Failed to get registration token for runner %d: %v", i+1, err)
+			continue
+		}
+		
+		// Create spot instance with token
+		spotRequestID, err := awsInfra.CreateSpotInstanceForPipeline(ctx, runnerName, token.Token, config.RunnerLabels)
+		if err != nil {
+			log.Printf("❌ Failed to create runner %d: %v", i+1, err)
+			continue
+		}
+		
+		log.Printf("✅ Created runner %d: %s (spot request: %s)", i+1, runnerName, *spotRequestID)
+		successCount++
+	}
+	
+	log.Printf("🎯 Scaling Result: Successfully created %d/%d requested runners", successCount, runnersNeeded)
+	
+	if successCount == 0 && runnersNeeded > 0 {
+		return fmt.Errorf("failed to create any of the %d needed runners", runnersNeeded)
+	}
+	
+	return nil
+}
+
+// executeRunnerScaling contains the main logic for checking jobs and scaling runners (legacy)
 func executeRunnerScaling(ctx context.Context, awsInfra *AWSInfrastructure, config Config) error {
 	log.Printf("Checking for queued GitHub Actions workflows")
 

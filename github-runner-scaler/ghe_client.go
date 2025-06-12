@@ -197,14 +197,26 @@ func (c *GHEClient) getWorkflowRunsAcrossRepos(ctx context.Context, status strin
 
 	var allRuns []WorkflowRun
 	totalCount := 0
+	repoStats := make(map[string]int) // Track workflows per repository
 
 	// Get workflow runs for each repository
 	for _, repo := range repos {
+		// First check if GitHub Actions is enabled for this repository
+		if !c.IsGitHubActionsEnabled(ctx, repo.Owner.Login, repo.Name) {
+			log.Printf("⏭️  Skipping %s - GitHub Actions disabled", repo.FullName)
+			continue
+		}
+
 		repoRuns, err := c.getRepositoryWorkflowRuns(ctx, repo.Owner.Login, repo.Name, status)
 		if err != nil {
-			// Log error but continue with other repositories
-			fmt.Printf("Warning: failed to get workflow runs for %s: %v\n", repo.FullName, err)
+			log.Printf("⚠️  Failed to get workflow runs for %s: %v", repo.FullName, err)
 			continue
+		}
+
+		repoWorkflowCount := len(repoRuns.WorkflowRuns)
+		if repoWorkflowCount > 0 {
+			repoStats[repo.FullName] = repoWorkflowCount
+			log.Printf("📊 Repository %s has %d %s workflows", repo.FullName, repoWorkflowCount, status)
 		}
 
 		// Add repository info to each run
@@ -213,6 +225,12 @@ func (c *GHEClient) getWorkflowRunsAcrossRepos(ctx context.Context, status strin
 			allRuns = append(allRuns, run)
 		}
 		totalCount += repoRuns.TotalCount
+	}
+
+	// Log summary of repository distribution
+	log.Printf("📈 Workflow distribution across repositories:")
+	for repoName, count := range repoStats {
+		log.Printf("   %s: %d workflows", repoName, count)
 	}
 
 	return &WorkflowRunsList{
@@ -267,6 +285,29 @@ func (c *GHEClient) GetWorkflowJobs(ctx context.Context, owner, repo string, run
 	}
 
 	return response.Jobs, nil
+}
+
+// IsGitHubActionsEnabled checks if GitHub Actions is enabled for a repository
+func (c *GHEClient) IsGitHubActionsEnabled(ctx context.Context, owner, repo string) bool {
+	// Try to access the Actions API endpoint for the repository
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/workflows", c.baseURL, owner, repo)
+	
+	resp, err := c.makeRequest(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("🔍 Error checking Actions status for %s/%s: %v", owner, repo, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// If we get 200, Actions is enabled
+	// If we get 404, Actions is likely disabled
+	enabled := resp.StatusCode == http.StatusOK
+	
+	if !enabled {
+		log.Printf("🚫 GitHub Actions appears to be disabled for %s/%s (HTTP %d)", owner, repo, resp.StatusCode)
+	}
+	
+	return enabled
 }
 
 // GetRegistrationToken gets a new runner registration token
@@ -393,6 +434,15 @@ func (c *GHEClient) FilterWorkflowsMatchingLabels(ctx context.Context, workflows
 
 		log.Printf("🔄 [%d/%d] Checking workflow %d in %s (status: %s)", 
 			i+1, len(workflows), workflow.ID, workflow.Repository.FullName, workflow.Status)
+
+		// Quick check: if this repository frequently has 404 errors, check if Actions is enabled
+		if strings.Contains(workflow.Repository.FullName, "prepared-images-collection") {
+			if !c.IsGitHubActionsEnabled(ctx, workflow.Repository.Owner.Login, workflow.Repository.Name) {
+				log.Printf("⏭️  Skipping workflow %d - repository %s has Actions disabled", 
+					workflow.ID, workflow.Repository.FullName)
+				continue
+			}
+		}
 
 		// Get jobs for this workflow
 		jobs, err := c.GetWorkflowJobs(ctx, workflow.Repository.Owner.Login, workflow.Repository.Name, workflow.ID)
