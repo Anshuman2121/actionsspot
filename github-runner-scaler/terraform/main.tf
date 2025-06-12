@@ -104,13 +104,15 @@ resource "aws_dynamodb_table" "github_runners" {
   }
 
   global_secondary_index {
-    name     = "JobRequestIndex"
-    hash_key = "job_request_id"
+    name            = "JobRequestIndex"
+    hash_key        = "job_request_id"
+    projection_type = "ALL"
   }
 
   global_secondary_index {
-    name     = "StatusIndex"
-    hash_key = "status"
+    name            = "StatusIndex"
+    hash_key        = "status"
+    projection_type = "ALL"
   }
 
   tags = {
