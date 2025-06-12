@@ -3,11 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"time"
-	"encoding/json"
 )
 
 type PipelineMonitor struct {
@@ -262,27 +259,6 @@ func (pm *PipelineMonitor) getCurrentPendingRunners() int {
 	return 0
 }
 
-// Utility function to get running workflows (add to GHE client)
-func (c *GHEClient) GetRunningWorkflowRuns(ctx context.Context) (*WorkflowRunsList, error) {
-	url := fmt.Sprintf("%s/orgs/%s/actions/runs?status=in_progress", c.baseURL, c.config.OrganizationName)
-	
-	resp, err := c.makeRequest(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get running workflow runs (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	var runs WorkflowRunsList
-	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &runs, nil
-}
 
  

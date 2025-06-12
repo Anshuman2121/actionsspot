@@ -133,6 +133,28 @@ runner_labels = [
 ]
 ```
 
+#### 11. **Repository Names** (`repository_names`) - OPTIONAL
+**What it is:** List of specific repositories to monitor for workflow runs.
+**Default:** If not specified, monitors ALL repositories in the organization.
+
+**How to configure:**
+```hcl
+# Monitor specific repositories only
+repository_names = [
+  "my-app-repo",
+  "infrastructure-repo",
+  "api-service"
+]
+
+# Or monitor repositories from different organizations
+repository_names = [
+  "TelenorSweden/my-app-repo",
+  "TelenorSweden/another-repo"
+]
+```
+
+**Note:** This is recommended for large organizations with many repositories to improve performance and reduce API calls.
+
 ## 🎯 **Step-by-Step Deployment**
 
 ### **Step 1: Clone and Prepare**
@@ -160,6 +182,9 @@ min_runners = 0
 max_runners = 10
 runner_labels = ["self-hosted", "linux", "x64", "lambda-managed"]
 cleanup_offline_runners = true
+
+# Optional: Monitor specific repositories only (improves performance)
+# repository_names = ["my-app-repo", "api-service", "infrastructure"]
 EOF
 ```
 
@@ -234,6 +259,19 @@ go run . test
 # Test connectivity
 curl -H "Authorization: token YOUR_TOKEN" \
   https://TelenorSwedenAB.ghe.com/api/v3/user
+```
+
+#### 🔴 **"Not Found" (HTTP 404) for workflow runs**
+This is likely because you need to configure specific repositories:
+```bash
+# Add repository names to your terraform.tfvars
+repository_names = ["repo1", "repo2", "repo3"]
+```
+
+Or test a specific repository:
+```bash
+curl -H "Authorization: token YOUR_TOKEN" \
+  https://TelenorSwedenAB.ghe.com/api/v3/repos/TelenorSweden/REPO_NAME/actions/runs
 ```
 
 #### 🔴 **"No spot instances created"**

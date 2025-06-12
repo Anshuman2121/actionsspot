@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"strings"
 )
 
 const (
@@ -48,6 +49,17 @@ type WorkflowRun struct {
 	Status     string `json:"status"`     // queued, in_progress, completed
 	Conclusion string `json:"conclusion"` // success, failure, cancelled
 	RunnerName string `json:"runner_name,omitempty"`
+	Repository *Repository `json:"repository,omitempty"`
+}
+
+type Repository struct {
+	Name      string `json:"name"`
+	FullName  string `json:"full_name"`
+	Owner     *Owner `json:"owner"`
+}
+
+type Owner struct {
+	Login string `json:"login"`
 }
 
 type WorkflowRunsList struct {
@@ -88,9 +100,121 @@ func (c *GHEClient) GetSelfHostedRunners(ctx context.Context) (*SelfHostedRunner
 	return &runners, nil
 }
 
-// GetQueuedWorkflowRuns gets workflow runs that are queued and waiting for runners
+// GetRepositoriesInOrganization gets list of repositories in the organization
+func (c *GHEClient) GetRepositoriesInOrganization(ctx context.Context) ([]Repository, error) {
+	url := fmt.Sprintf("%s/orgs/%s/repos?per_page=100", c.baseURL, c.config.OrganizationName)
+	
+	var allRepos []Repository
+	page := 1
+	
+	for {
+		pageURL := fmt.Sprintf("%s&page=%d", url, page)
+		resp, err := c.makeRequest(ctx, "GET", pageURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to make request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("failed to get repositories (HTTP %d): %s", resp.StatusCode, string(body))
+		}
+
+		var repos []Repository
+		if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		if len(repos) == 0 {
+			break
+		}
+
+		allRepos = append(allRepos, repos...)
+		page++
+		
+		// Prevent infinite loops - GitHub has a max of 1000 repos per org
+		if page > 10 {
+			break
+		}
+	}
+
+	return allRepos, nil
+}
+
+// GetQueuedWorkflowRuns gets workflow runs that are queued across repositories in the organization
 func (c *GHEClient) GetQueuedWorkflowRuns(ctx context.Context) (*WorkflowRunsList, error) {
-	url := fmt.Sprintf("%s/orgs/%s/actions/runs?status=queued", c.baseURL, c.config.OrganizationName)
+	return c.getWorkflowRunsAcrossRepos(ctx, "queued")
+}
+
+// GetRunningWorkflowRuns gets workflow runs that are in progress across repositories
+func (c *GHEClient) GetRunningWorkflowRuns(ctx context.Context) (*WorkflowRunsList, error) {
+	return c.getWorkflowRunsAcrossRepos(ctx, "in_progress")
+}
+
+// getWorkflowRunsAcrossRepos gets workflow runs with specified status across organization repositories
+func (c *GHEClient) getWorkflowRunsAcrossRepos(ctx context.Context, status string) (*WorkflowRunsList, error) {
+	var repos []Repository
+	var err error
+
+	// If specific repositories are configured, use them; otherwise get all org repos
+	if len(c.config.RepositoryNames) > 0 {
+		for _, repoName := range c.config.RepositoryNames {
+			// Parse repo name (could be "owner/repo" or just "repo")
+			var owner, name string
+			if strings.Contains(repoName, "/") {
+				parts := strings.Split(repoName, "/")
+				if len(parts) == 2 {
+					owner, name = parts[0], parts[1]
+				} else {
+					continue // Invalid format, skip
+				}
+			} else {
+				owner, name = c.config.OrganizationName, repoName
+			}
+
+			repos = append(repos, Repository{
+				Name:     name,
+				FullName: fmt.Sprintf("%s/%s", owner, name),
+				Owner:    &Owner{Login: owner},
+			})
+		}
+	} else {
+		// Get all repositories in the organization
+		repos, err = c.GetRepositoriesInOrganization(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get repositories: %w", err)
+		}
+	}
+
+	var allRuns []WorkflowRun
+	totalCount := 0
+
+	// Get workflow runs for each repository
+	for _, repo := range repos {
+		repoRuns, err := c.getRepositoryWorkflowRuns(ctx, repo.Owner.Login, repo.Name, status)
+		if err != nil {
+			// Log error but continue with other repositories
+			fmt.Printf("Warning: failed to get workflow runs for %s: %v\n", repo.FullName, err)
+			continue
+		}
+
+		// Add repository info to each run
+		for _, run := range repoRuns.WorkflowRuns {
+			run.Repository = &repo
+			allRuns = append(allRuns, run)
+		}
+		totalCount += repoRuns.TotalCount
+	}
+
+	return &WorkflowRunsList{
+		TotalCount:   totalCount,
+		WorkflowRuns: allRuns,
+	}, nil
+}
+
+// getRepositoryWorkflowRuns gets workflow runs for a specific repository
+func (c *GHEClient) getRepositoryWorkflowRuns(ctx context.Context, owner, repo, status string) (*WorkflowRunsList, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs?status=%s&per_page=100", c.baseURL, owner, repo, status)
 	
 	resp, err := c.makeRequest(ctx, "GET", url, nil)
 	if err != nil {

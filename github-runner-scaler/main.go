@@ -36,6 +36,7 @@ type Config struct {
 	DynamoDBTableName        string
 	RunnerLabels             []string
 	CleanupOfflineRunners    bool
+	RepositoryNames          []string // Optional: specific repositories to monitor, if empty monitors all org repos
 }
 
 
@@ -95,6 +96,13 @@ func LoadConfig() (Config, error) {
 
 	cleanupOffline, _ := strconv.ParseBool(getEnvOrDefault("CLEANUP_OFFLINE_RUNNERS", "true"))
 
+	var repositoryNames []string
+	if repoNames := os.Getenv("REPOSITORY_NAMES"); repoNames != "" {
+		if err := json.Unmarshal([]byte(repoNames), &repositoryNames); err != nil {
+			return Config{}, fmt.Errorf("invalid REPOSITORY_NAMES JSON: %w", err)
+		}
+	}
+
 	return Config{
 		GitHubToken:              os.Getenv("GITHUB_TOKEN"),
 		GitHubEnterpriseURL:      getEnvOrDefault("GITHUB_ENTERPRISE_URL", "https://TelenorSwedenAB.ghe.com"),
@@ -110,6 +118,7 @@ func LoadConfig() (Config, error) {
 		DynamoDBTableName:        getEnvOrDefault("DYNAMODB_TABLE_NAME", "github-runners"),
 		RunnerLabels:             runnerLabels,
 		CleanupOfflineRunners:    cleanupOffline,
+		RepositoryNames:          repositoryNames,
 	}, nil
 }
 
