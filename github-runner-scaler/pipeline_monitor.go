@@ -285,20 +285,4 @@ func (c *GHEClient) GetRunningWorkflowRuns(ctx context.Context) (*WorkflowRunsLi
 	return &runs, nil
 }
 
-// RemoveRunner removes a self-hosted runner from GitHub
-func (c *GHEClient) RemoveRunner(ctx context.Context, runnerID int) error {
-	url := fmt.Sprintf("%s/orgs/%s/actions/runners/%d", c.baseURL, c.config.OrganizationName, runnerID)
-	
-	resp, err := c.makeRequest(ctx, "DELETE", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to remove runner (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-} 
+ 

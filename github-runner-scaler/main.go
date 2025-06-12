@@ -11,89 +11,14 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 )
 
-type GitHubActionsClient interface {
-	GetAcquirableJobs(ctx context.Context, runnerScaleSetId int) (*AcquirableJobList, error)
-	CreateMessageSession(ctx context.Context, runnerScaleSetId int, owner string) (*RunnerScaleSetSession, error)
-	GetMessage(ctx context.Context, messageQueueUrl, messageQueueAccessToken string, lastMessageId int64, maxCapacity int) (*RunnerScaleSetMessage, error)
-	DeleteMessage(ctx context.Context, messageQueueUrl, messageQueueAccessToken string, messageId int64) error
-	AcquireJobs(ctx context.Context, runnerScaleSetId int, messageQueueAccessToken string, requestIds []int64) ([]int64, error)
-	RefreshMessageSession(ctx context.Context, runnerScaleSetId int, sessionId string) (*RunnerScaleSetSession, error)
-	DeleteMessageSession(ctx context.Context, runnerScaleSetId int, sessionId string) error
-}
-
-// GitHub Actions types
-type AcquirableJobList struct {
-	Count int             `json:"count"`
-	Jobs  []AcquirableJob `json:"value"`
-}
-
-type AcquirableJob struct {
-	AcquireJobUrl   string   `json:"acquireJobUrl"`
-	MessageType     string   `json:"messageType"`
-	RunnerRequestId int64    `json:"runnerRequestId"`
-	RepositoryName  string   `json:"repositoryName"`
-	OwnerName       string   `json:"ownerName"`
-	JobWorkflowRef  string   `json:"jobWorkflowRef"`
-	EventName       string   `json:"eventName"`
-	RequestLabels   []string `json:"requestLabels"`
-}
-
-type RunnerScaleSetSession struct {
-	SessionId               string                   `json:"sessionId"`
-	OwnerName               string                   `json:"ownerName"`
-	RunnerScaleSet          *RunnerScaleSet          `json:"runnerScaleSet"`
-	MessageQueueUrl         string                   `json:"messageQueueUrl"`
-	MessageQueueAccessToken string                   `json:"messageQueueAccessToken"`
-	Statistics              *RunnerScaleSetStatistic `json:"statistics"`
-}
-
-type RunnerScaleSet struct {
-	Id   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type RunnerScaleSetMessage struct {
-	MessageId   int64                    `json:"messageId"`
-	MessageType string                   `json:"messageType"`
-	Body        string                   `json:"body"`
-	Statistics  *RunnerScaleSetStatistic `json:"statistics"`
-}
-
-type RunnerScaleSetStatistic struct {
-	TotalAvailableJobs     int `json:"totalAvailableJobs"`
-	TotalAcquiredJobs      int `json:"totalAcquiredJobs"`
-	TotalAssignedJobs      int `json:"totalAssignedJobs"`
-	TotalRunningJobs       int `json:"totalRunningJobs"`
-	TotalRegisteredRunners int `json:"totalRegisteredRunners"`
-	TotalBusyRunners       int `json:"totalBusyRunners"`
-	TotalIdleRunners       int `json:"totalIdleRunners"`
-}
-
-type JobAvailable struct {
-	AcquireJobUrl string `json:"acquireJobUrl"`
-	JobMessageBase
-}
-
-type JobMessageBase struct {
-	MessageType     string    `json:"messageType"`
-	RunnerRequestId int64     `json:"runnerRequestId"`
-	RepositoryName  string    `json:"repositoryName"`
-	OwnerName       string    `json:"ownerName"`
-	JobWorkflowRef  string    `json:"jobWorkflowRef"`
-	JobDisplayName  string    `json:"jobDisplayName"`
-	EventName       string    `json:"eventName"`
-	RequestLabels   []string  `json:"requestLabels"`
-	QueueTime       time.Time `json:"queueTime"`
-}
+// No longer using runner scale set types - using pipeline monitor approach
 
 // Lambda handler configuration
 type Config struct {
@@ -113,18 +38,13 @@ type Config struct {
 	CleanupOfflineRunners    bool
 }
 
-type GitHubAppConfig struct {
-	AppID          int64
-	InstallationID int64
-	PrivateKey     string
-}
+
 
 // AWS infrastructure
 type AWSInfrastructure struct {
-	ec2Client       *ec2.Client
-	dynamoDBClient  *dynamodb.Client
-	eventBridgeClient *eventbridge.Client
-	config          Config
+	ec2Client      *ec2.Client
+	dynamoDBClient *dynamodb.Client
+	config         Config
 }
 
 // DynamoDB schema for tracking runners and sessions
@@ -138,14 +58,7 @@ type RunnerRecord struct {
 	SpotRequestID      string    `dynamodbav:"spot_request_id,omitempty"`
 }
 
-type SessionRecord struct {
-	SessionID               string    `dynamodbav:"session_id"`
-	MessageQueueUrl         string    `dynamodbav:"message_queue_url"`
-	MessageQueueAccessToken string    `dynamodbav:"message_queue_access_token"`
-	LastMessageID           int64     `dynamodbav:"last_message_id"`
-	CreatedAt               time.Time `dynamodbav:"created_at"`
-	UpdatedAt               time.Time `dynamodbav:"updated_at"`
-}
+
 
 // Initialize AWS infrastructure
 func NewAWSInfrastructure(ctx context.Context, cfg Config) (*AWSInfrastructure, error) {
@@ -155,10 +68,9 @@ func NewAWSInfrastructure(ctx context.Context, cfg Config) (*AWSInfrastructure, 
 	}
 
 	return &AWSInfrastructure{
-		ec2Client:       ec2.NewFromConfig(awsCfg),
-		dynamoDBClient:  dynamodb.NewFromConfig(awsCfg),
-		eventBridgeClient: eventbridge.NewFromConfig(awsCfg),
-		config:          cfg,
+		ec2Client:      ec2.NewFromConfig(awsCfg),
+		dynamoDBClient: dynamodb.NewFromConfig(awsCfg),
+		config:         cfg,
 	}, nil
 }
 
@@ -211,17 +123,17 @@ func getEnvOrDefault(key, defaultValue string) string {
 // Create Spot Instance for GitHub Runner
 func (aws *AWSInfrastructure) CreateSpotInstance(ctx context.Context, jobID int64, labels []string) (*string, error) {
 	// Generate user data script for runner installation
-	userData := aws.generateUserDataScript(jobID, labels)
+	userData := aws.generateUserDataScriptForJob(jobID, labels)
 
 	// Spot instance request specification
 	spotPrice := aws.config.EC2SpotPrice
 	launchSpec := &ec2types.RequestSpotLaunchSpecification{
-		ImageId:        aws.String(aws.config.EC2AMI),
-		InstanceType:   ec2types.InstanceType(aws.config.EC2InstanceType),
-		KeyName:        aws.String(aws.config.EC2KeyPairName),
-		SecurityGroups: []ec2types.GroupIdentifier{{GroupId: aws.String(aws.config.EC2SecurityGroupID)}},
-		SubnetId:       aws.String(aws.config.EC2SubnetID),
-		UserData:       aws.String(userData),
+		ImageId:          aws.String(aws.config.EC2AMI),
+		InstanceType:     ec2types.InstanceType(aws.config.EC2InstanceType),
+		KeyName:          aws.String(aws.config.EC2KeyPairName),
+		SecurityGroupIds: []string{aws.config.EC2SecurityGroupID},
+		SubnetId:         aws.String(aws.config.EC2SubnetID),
+		UserData:         aws.String(userData),
 		Monitoring: &ec2types.RunInstancesMonitoringEnabled{
 			Enabled: aws.Bool(true),
 		},
@@ -281,12 +193,12 @@ func (aws *AWSInfrastructure) CreateSpotInstanceForPipeline(ctx context.Context,
 	// Spot instance request specification
 	spotPrice := aws.config.EC2SpotPrice
 	launchSpec := &ec2types.RequestSpotLaunchSpecification{
-		ImageId:        aws.String(aws.config.EC2AMI),
-		InstanceType:   ec2types.InstanceType(aws.config.EC2InstanceType),
-		KeyName:        aws.String(aws.config.EC2KeyPairName),
-		SecurityGroups: []ec2types.GroupIdentifier{{GroupId: aws.String(aws.config.EC2SecurityGroupID)}},
-		SubnetId:       aws.String(aws.config.EC2SubnetID),
-		UserData:       aws.String(userData),
+		ImageId:          aws.String(aws.config.EC2AMI),
+		InstanceType:     ec2types.InstanceType(aws.config.EC2InstanceType),
+		KeyName:          aws.String(aws.config.EC2KeyPairName),
+		SecurityGroupIds: []string{aws.config.EC2SecurityGroupID},
+		SubnetId:         aws.String(aws.config.EC2SubnetID),
+		UserData:         aws.String(userData),
 		Monitoring: &ec2types.RunInstancesMonitoringEnabled{
 			Enabled: aws.Bool(true),
 		},
@@ -336,6 +248,31 @@ func (aws *AWSInfrastructure) CreateSpotInstanceForPipeline(ctx context.Context,
 	}
 
 	return spotRequestID, nil
+}
+
+// Generate user data script for EC2 instance for a specific job (legacy method)
+func (aws *AWSInfrastructure) generateUserDataScriptForJob(jobID int64, labels []string) string {
+	// This is a simplified version - in production you'd get a registration token
+	runnerName := fmt.Sprintf("runner-job-%d", jobID)
+	labelsStr := "self-hosted,linux,x64"
+	if len(labels) > 0 {
+		labelsStr = ""
+		for i, label := range labels {
+			if i > 0 {
+				labelsStr += ","
+			}
+			labelsStr += label
+		}
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+echo "This legacy method needs a registration token"
+echo "Runner: %s, Labels: %s, Job: %d"
+# This would normally setup the runner but needs proper token handling
+`, runnerName, labelsStr, jobID)
+
+	return script
 }
 
 // Generate user data script for EC2 instance with registration token
@@ -522,130 +459,20 @@ func Handler(ctx context.Context, event events.CloudWatchEvent) error {
 }
 
 // executeRunnerScaling contains the main logic for checking jobs and scaling runners
-func executeRunnerScaling(ctx context.Context, githubClient GitHubActionsClient, awsInfra *AWSInfrastructure, config Config) error {
-	log.Printf("Checking for available GitHub Actions jobs for scale set %d", config.RunnerScaleSetID)
+func executeRunnerScaling(ctx context.Context, awsInfra *AWSInfrastructure, config Config) error {
+	log.Printf("Checking for queued GitHub Actions workflows")
 
-	// Step 1: Try to get or create a message session
-	session, err := awsInfra.getOrCreateSession(ctx, githubClient, config.RunnerScaleSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get or create session: %w", err)
-	}
-
-	// Step 2: Get messages from GitHub Actions
-	message, err := githubClient.GetMessage(ctx, session.MessageQueueUrl, session.MessageQueueAccessToken, 0, config.MaxRunners)
-	if err != nil {
-		return fmt.Errorf("failed to get message: %w", err)
-	}
-
-	// If no message, check current statistics and maintain minimum runners
-	if message == nil {
-		log.Printf("No new messages, maintaining current state")
-		return awsInfra.maintainMinRunners(ctx, config.MinRunners)
-	}
-
-	log.Printf("Received message: ID=%d, Type=%s", message.MessageId, message.MessageType)
-
-	// Step 3: Parse available jobs from the message
-	availableJobs, err := ParseJobsFromMessage(message.Body)
-	if err != nil {
-		return fmt.Errorf("failed to parse jobs from message: %w", err)
-	}
-
-	log.Printf("Found %d available jobs", len(availableJobs))
-
-	// Step 4: Calculate how many runners we need
-	neededRunners := awsInfra.calculateNeededRunners(ctx, message.Statistics, len(availableJobs), config)
-	log.Printf("Need %d runners based on statistics and available jobs", neededRunners)
-
-	// Step 5: Create spot instances for needed runners
-	if neededRunners > 0 {
-		err := awsInfra.createRunnersForJobs(ctx, availableJobs, neededRunners)
-		if err != nil {
-			log.Printf("Failed to create some runners: %v", err)
-		}
-
-		// Step 6: Acquire the jobs
-		if len(availableJobs) > 0 {
-			jobIDs := make([]int64, len(availableJobs))
-			for i, job := range availableJobs {
-				jobIDs[i] = job.RunnerRequestId
-			}
-
-			acquiredJobs, err := githubClient.AcquireJobs(ctx, config.RunnerScaleSetID, session.MessageQueueAccessToken, jobIDs)
-			if err != nil {
-				log.Printf("Failed to acquire jobs: %v", err)
-			} else {
-				log.Printf("Successfully acquired %d jobs: %v", len(acquiredJobs), acquiredJobs)
-			}
-		}
-	}
-
-	// Step 7: Delete the processed message
-	if err := githubClient.DeleteMessage(ctx, session.MessageQueueUrl, session.MessageQueueAccessToken, message.MessageId); err != nil {
-		log.Printf("Failed to delete message: %v", err)
-	}
-
-	return nil
+	// Create GHE client for pipeline monitoring
+	gheClient := NewGHEClient(config)
+	
+	// Create pipeline monitor
+	monitor := NewPipelineMonitor(gheClient, awsInfra, config)
+	
+	// Check for pending pipelines and scale accordingly
+	return monitor.MonitorAndScale(ctx)
 }
 
-// getOrCreateSession retrieves an existing session from DynamoDB or creates a new one
-func (aws *AWSInfrastructure) getOrCreateSession(ctx context.Context, githubClient GitHubActionsClient, scaleSetID int) (*RunnerScaleSetSession, error) {
-	// Try to get existing session from DynamoDB
-	session, err := aws.getSessionFromDB(ctx, scaleSetID)
-	if err == nil && session != nil {
-		log.Printf("Using existing session: %s", session.SessionId)
-		return session, nil
-	}
 
-	// Create new session
-	log.Printf("Creating new GitHub message session")
-	session, err = githubClient.CreateMessageSession(ctx, scaleSetID, "lambda-runner-scaler")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create message session: %w", err)
-	}
-
-	// Store session in DynamoDB
-	if err := aws.storeSessionInDB(ctx, session); err != nil {
-		log.Printf("Failed to store session in DB: %v", err)
-	}
-
-	return session, nil
-}
-
-// getSessionFromDB retrieves session from DynamoDB
-func (aws *AWSInfrastructure) getSessionFromDB(ctx context.Context, scaleSetID int) (*RunnerScaleSetSession, error) {
-	// Implementation for retrieving session from DynamoDB
-	// For now, return nil to force creation of new session
-	return nil, fmt.Errorf("session not found")
-}
-
-// storeSessionInDB stores session in DynamoDB
-func (aws *AWSInfrastructure) storeSessionInDB(ctx context.Context, session *RunnerScaleSetSession) error {
-	sessionRecord := SessionRecord{
-		SessionID:               session.SessionId,
-		MessageQueueUrl:         session.MessageQueueUrl,
-		MessageQueueAccessToken: session.MessageQueueAccessToken,
-		LastMessageID:           0,
-		CreatedAt:               time.Now(),
-		UpdatedAt:               time.Now(),
-	}
-
-	item := map[string]types.AttributeValue{
-		"session_id":                  &types.AttributeValueMemberS{Value: sessionRecord.SessionID},
-		"message_queue_url":           &types.AttributeValueMemberS{Value: sessionRecord.MessageQueueUrl},
-		"message_queue_access_token":  &types.AttributeValueMemberS{Value: sessionRecord.MessageQueueAccessToken},
-		"last_message_id":             &types.AttributeValueMemberN{Value: strconv.FormatInt(sessionRecord.LastMessageID, 10)},
-		"created_at":                  &types.AttributeValueMemberS{Value: sessionRecord.CreatedAt.Format(time.RFC3339)},
-		"updated_at":                  &types.AttributeValueMemberS{Value: sessionRecord.UpdatedAt.Format(time.RFC3339)},
-	}
-
-	_, err := aws.dynamoDBClient.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(aws.config.DynamoDBTableName + "-sessions"),
-		Item:      item,
-	})
-
-	return err
-}
 
 // maintainMinRunners ensures we have at least the minimum number of runners
 func (aws *AWSInfrastructure) maintainMinRunners(ctx context.Context, minRunners int) error {
@@ -687,85 +514,10 @@ func (aws *AWSInfrastructure) getCurrentRunnerCount(ctx context.Context) (int, e
 	return 0, nil
 }
 
-// calculateNeededRunners determines how many runners we need based on statistics and available jobs
-func (aws *AWSInfrastructure) calculateNeededRunners(ctx context.Context, stats *RunnerScaleSetStatistic, availableJobs int, config Config) int {
-	if stats == nil {
-		return availableJobs
-	}
 
-	// Calculate based on:
-	// 1. Available jobs that need runners
-	// 2. Current assigned jobs without runners
-	// 3. Minimum runners requirement
-	// 4. Maximum runners limit
 
-	needed := availableJobs + stats.TotalAssignedJobs - stats.TotalRegisteredRunners
 
-	// Ensure we don't go below minimum
-	if needed < config.MinRunners {
-		needed = config.MinRunners
-	}
 
-	// Ensure we don't exceed maximum
-	if needed > config.MaxRunners {
-		needed = config.MaxRunners
-	}
-
-	// Don't create negative runners
-	if needed < 0 {
-		needed = 0
-	}
-
-	return needed
-}
-
-// createRunnersForJobs creates spot instances for the given jobs
-func (aws *AWSInfrastructure) createRunnersForJobs(ctx context.Context, jobs []*JobAvailable, maxRunners int) error {
-	created := 0
-	for i, job := range jobs {
-		if created >= maxRunners {
-			break
-		}
-
-		labels := job.RequestLabels
-		if len(labels) == 0 {
-			labels = aws.config.RunnerLabels
-		}
-
-		_, err := aws.CreateSpotInstance(ctx, job.RunnerRequestId, labels)
-		if err != nil {
-			log.Printf("Failed to create runner for job %d: %v", job.RunnerRequestId, err)
-			continue
-		}
-
-		created++
-		log.Printf("Created runner %d/%d for job %d", i+1, maxRunners, job.RunnerRequestId)
-	}
-
-	return nil
-}
-
-// Schedule next execution using EventBridge
-func (aws *AWSInfrastructure) ScheduleNextExecution(ctx context.Context) error {
-	// Create EventBridge rule for next execution (60 seconds from now)
-	ruleName := "github-runner-scaler-schedule"
-	scheduleExpression := "rate(1 minute)"
-
-	putRuleInput := &eventbridge.PutRuleInput{
-		Name:               aws.String(ruleName),
-		ScheduleExpression: aws.String(scheduleExpression),
-		State:              "ENABLED",
-		Description:        aws.String("Schedule GitHub Runner Scaler Lambda execution every 60 seconds"),
-	}
-
-	_, err := aws.eventBridgeClient.PutRule(ctx, putRuleInput)
-	if err != nil {
-		return fmt.Errorf("failed to create EventBridge rule: %w", err)
-	}
-
-	log.Printf("Scheduled next execution in 60 seconds")
-	return nil
-}
 
 func main() {
 	lambda.Start(Handler)
