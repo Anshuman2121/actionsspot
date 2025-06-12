@@ -328,7 +328,7 @@ resource "aws_lambda_function" "github_runner_scaler" {
   filename         = "../github-runner-scaler.zip"
   function_name    = "github-runner-scaler"
   role            = aws_iam_role.lambda_role.arn
-  handler         = "main"
+  handler         = "bootstrap"
   runtime         = "provided.al2"
   timeout         = 900 # 15 minutes
 

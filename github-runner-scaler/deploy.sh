@@ -26,7 +26,7 @@ echo "✅ Go version: $(go version)"
 echo "📦 Building Lambda function..."
 
 # Clean up any previous builds
-rm -f main github-runner-scaler.zip
+rm -f bootstrap main github-runner-scaler.zip
 
 # Initialize go modules if needed
 if [ ! -f "go.sum" ]; then
@@ -36,16 +36,16 @@ fi
 
 # Build for Linux (Lambda environment)
 echo "🔨 Compiling for Linux..."
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o main .
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o bootstrap .
 
 # Verify the binary was created
-if [ ! -f "main" ]; then
-    echo "❌ Build failed - main binary not found"
+if [ ! -f "bootstrap" ]; then
+    echo "❌ Build failed - bootstrap binary not found"
     exit 1
 fi
 
 echo "📦 Creating deployment package..."
-zip github-runner-scaler.zip main
+zip github-runner-scaler.zip bootstrap
 
 echo "✅ Build completed successfully!"
 echo "📋 Package details:"
@@ -100,7 +100,7 @@ fi
 
 # Clean up
 cd ..
-rm -f main
+rm -f bootstrap main
 
 echo ""
 echo "🎯 Lambda function deployed and scheduled to run every 60 seconds"
