@@ -45,7 +45,10 @@ if [ ! -f "bootstrap" ]; then
 fi
 
 echo "📦 Creating deployment package..."
-zip github-runner-scaler.zip bootstrap
+# Ensure bootstrap has execute permissions
+chmod +x bootstrap
+# Create zip with proper permissions
+zip -j github-runner-scaler.zip bootstrap
 
 echo "✅ Build completed successfully!"
 echo "📋 Package details:"

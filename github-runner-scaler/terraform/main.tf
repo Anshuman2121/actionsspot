@@ -325,12 +325,14 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 
 # Lambda function
 resource "aws_lambda_function" "github_runner_scaler" {
-  filename         = "../github-runner-scaler.zip"
+  filename         = "github-runner-scaler.zip"
   function_name    = "github-runner-scaler"
   role            = aws_iam_role.lambda_role.arn
   handler         = "bootstrap"
   runtime         = "provided.al2"
   timeout         = 900 # 15 minutes
+  memory_size      = 512
+  architectures    = ["x86_64"]
 
   environment {
     variables = {
