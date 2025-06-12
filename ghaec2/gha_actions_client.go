@@ -149,7 +149,9 @@ func NewActionsServiceClient(gitHubEnterpriseURL, token string, logger logr.Logg
 
 // Initialize discovers the Actions Service URL and gets admin token
 func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error {
-	c.logger.Info("Initializing Actions Service client", "organization", org)
+	c.logger.Info("Initializing Actions Service client", 
+		"organization", org,
+		"baseURL", c.baseURL)
 	
 	// First, try to get a registration token to discover the Actions Service URL
 	regToken, err := c.getRegistrationToken(ctx, org)
@@ -159,17 +161,19 @@ func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error
 	
 	c.logger.Info("Successfully obtained registration token")
 	
+	// For GitHub Enterprise, we use the same base URL for the Actions Service
+	c.actionsTokenURL = c.baseURL
+	
 	// Get Actions Service admin connection
 	adminConn, err := c.getActionsServiceAdminConnection(ctx, regToken)
 	if err != nil {
 		return fmt.Errorf("failed to get Actions Service admin connection: %w", err)
 	}
 	
-	if adminConn.ActionsServiceURL == nil || adminConn.AdminToken == nil {
-		return fmt.Errorf("invalid Actions Service connection response")
+	if adminConn.AdminToken == nil {
+		return fmt.Errorf("no admin token received in response")
 	}
 	
-	c.actionsTokenURL = *adminConn.ActionsServiceURL
 	c.adminToken = *adminConn.AdminToken
 	c.adminTokenExpiry = time.Now().Add(1 * time.Hour) // Tokens typically expire in 1 hour
 	
@@ -390,33 +394,65 @@ type ActionsServiceAdminConnection struct {
 }
 
 func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Context, regToken string) (*ActionsServiceAdminConnection, error) {
-	path := "/api/v3/actions/runner-groups/1/runners/registration-token"
-	url := fmt.Sprintf("%s%s", c.baseURL, path)
+	c.logger.Info("Getting Actions Service admin connection", 
+		"baseURL", c.baseURL,
+		"regTokenLength", len(regToken))
+
+	// For GitHub Enterprise, we need to use the same base URL
+	url := fmt.Sprintf("%s/api/v3/actions/runner-registration", c.baseURL)
 	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	payload := struct {
+		URL   string `json:"url"`
+		Token string `json:"token"`
+	}{
+		URL:   c.baseURL,
+		Token: regToken,
+	}
+	
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	
-	req.Header.Set("Authorization", fmt.Sprintf("RemoteAuth %s", regToken))
+	// Use the GitHub token for authentication, not the registration token
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	
+	c.logger.Info("Sending admin connection request", 
+		"url", url,
+		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
 	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 	
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, c.parseErrorResponse(resp)
 	}
 	
-	var conn ActionsServiceAdminConnection
-	if err := json.NewDecoder(resp.Body).Decode(&conn); err != nil {
+	var result ActionsServiceAdminConnection
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	
-	return &conn, nil
+	if result.ActionsServiceURL == nil {
+		// If no specific Actions Service URL is provided, use the base GitHub Enterprise URL
+		result.ActionsServiceURL = &c.baseURL
+	}
+	
+	c.logger.Info("Successfully obtained admin connection",
+		"actionsServiceURL", *result.ActionsServiceURL,
+		"adminTokenLength", len(*result.AdminToken))
+	
+	return &result, nil
 }
 
 func (c *ActionsServiceClient) createRunnerScaleSet(ctx context.Context, scaleSet *RunnerScaleSet) (*RunnerScaleSet, error) {
