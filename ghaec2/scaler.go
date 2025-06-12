@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -133,14 +134,18 @@ func (s *GHAListenerScaler) createMessageSession(ctx context.Context) error {
 
 // messagePollingLoop continuously polls for messages
 func (s *GHAListenerScaler) messagePollingLoop(ctx context.Context) error {
-	ticker := time.NewTicker(2 * time.Second) // Poll every 2 seconds for real-time response
-	defer ticker.Stop()
+	messageTicker := time.NewTicker(2 * time.Second) // Poll messages every 2 seconds for real-time response
+	defer messageTicker.Stop()
+	
+	s.logger.Info("Starting Actions Service message polling", 
+		"messagePollingInterval", "2s")
 	
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-messageTicker.C:
+			// Poll for Actions Service messages
 			if err := s.pollAndProcessMessages(ctx); err != nil {
 				s.logger.Error(err, "Failed to poll and process messages")
 				// Continue running despite errors
@@ -162,7 +167,7 @@ func (s *GHAListenerScaler) pollAndProcessMessages(ctx context.Context) error {
 	}
 	
 	if message == nil {
-		// No new messages
+		// No new messages - this is normal for Actions Service
 		return nil
 	}
 	
@@ -201,33 +206,8 @@ func (s *GHAListenerScaler) scaleBasedOnStatistics(ctx context.Context, stats *R
 		"idleRunners", stats.TotalIdleRunners,
 	)
 	
-	// In fallback mode, also check for acquirable jobs directly
-	additionalJobs := 0
-	if strings.Contains(s.actionsClient.actionsTokenURL, s.actionsClient.baseURL) && 
-	   s.actionsClient.adminToken == s.actionsClient.token {
-		s.logger.Info("Fallback mode: checking for acquirable jobs directly")
-		
-		jobList, err := s.actionsClient.GetAcquirableJobs(ctx, s.config.RunnerScaleSetID)
-		if err != nil {
-			s.logger.Error(err, "Failed to get acquirable jobs in fallback mode")
-		} else {
-			additionalJobs = jobList.Count
-			s.logger.Info("Found acquirable jobs via fallback", "jobCount", additionalJobs)
-			
-			// Process each job to trigger scaling
-			for _, job := range jobList.Jobs {
-				s.logger.Info("Found pending job",
-					"repository", job.RepositoryName,
-					"owner", job.OwnerName,
-					"workflowRef", job.JobWorkflowRef,
-					"labels", job.RequestLabels,
-				)
-			}
-		}
-	}
-	
-	// Calculate required runners based on pending jobs (including fallback jobs)
-	pendingJobs := stats.TotalAvailableJobs + stats.TotalAssignedJobs + additionalJobs
+	// Calculate required runners based on pending jobs
+	pendingJobs := stats.TotalAvailableJobs + stats.TotalAssignedJobs
 	
 	// Calculate desired runner count
 	desiredRunners := pendingJobs
@@ -250,7 +230,6 @@ func (s *GHAListenerScaler) scaleBasedOnStatistics(ctx context.Context, stats *R
 	
 	s.logger.Info("Scaling decision",
 		"pendingJobs", pendingJobs,
-		"additionalJobs", additionalJobs,
 		"currentRunners", currentRunners,
 		"desiredRunners", desiredRunners,
 		"minRunners", s.config.MinRunners,
@@ -270,17 +249,21 @@ func (s *GHAListenerScaler) scaleBasedOnStatistics(ctx context.Context, stats *R
 		}
 	}
 	
-	// Scale down if needed (but be conservative to avoid thrashing)
-	if desiredRunners < currentRunners && stats.TotalIdleRunners > 0 {
+	// Scale down if needed
+	if desiredRunners < currentRunners {
 		runnersToTerminate := currentRunners - desiredRunners
+		
+		// Respect idle runners count from Actions Service statistics
 		if runnersToTerminate > stats.TotalIdleRunners {
 			runnersToTerminate = stats.TotalIdleRunners
 		}
 		
-		s.logger.Info("Scaling down", "runnersToTerminate", runnersToTerminate)
-		
-		if err := s.terminateIdleRunners(ctx, runnersToTerminate); err != nil {
-			s.logger.Error(err, "Failed to terminate idle runners")
+		if runnersToTerminate > 0 {
+			s.logger.Info("Scaling down", "runnersToTerminate", runnersToTerminate)
+			
+			if err := s.terminateIdleRunners(ctx, runnersToTerminate); err != nil {
+				s.logger.Error(err, "Failed to terminate idle runners")
+			}
 		}
 	}
 	
@@ -530,13 +513,35 @@ func (s *GHAListenerScaler) terminateIdleRunners(ctx context.Context, count int)
 		return fmt.Errorf("failed to describe instances: %w", err)
 	}
 	
-	// Collect instance IDs (terminate oldest first)
-	var instanceIDs []string
+	// Collect instances with launch time (terminate oldest first)
+	type instanceInfo struct {
+		id         string
+		launchTime *time.Time
+	}
+	
+	var instances []instanceInfo
 	for _, reservation := range result.Reservations {
 		for _, instance := range reservation.Instances {
-			if len(instanceIDs) < count {
-				instanceIDs = append(instanceIDs, *instance.InstanceId)
-			}
+			instances = append(instances, instanceInfo{
+				id:         *instance.InstanceId,
+				launchTime: instance.LaunchTime,
+			})
+		}
+	}
+	
+	// Sort by launch time (oldest first)
+	sort.Slice(instances, func(i, j int) bool {
+		if instances[i].launchTime == nil || instances[j].launchTime == nil {
+			return instances[i].launchTime == nil
+		}
+		return instances[i].launchTime.Before(*instances[j].launchTime)
+	})
+	
+	// Select instances to terminate (oldest first)
+	var instanceIDs []string
+	for i, instance := range instances {
+		if i < count {
+			instanceIDs = append(instanceIDs, instance.id)
 		}
 	}
 	
@@ -553,7 +558,7 @@ func (s *GHAListenerScaler) terminateIdleRunners(ctx context.Context, count int)
 		return fmt.Errorf("failed to terminate instances: %w", err)
 	}
 	
-	s.logger.Info("Terminated instances", "instanceIds", instanceIDs)
+	s.logger.Info("Terminated instances", "instanceIds", instanceIDs, "count", len(instanceIDs))
 	return nil
 }
 
@@ -572,4 +577,14 @@ func (s *GHAListenerScaler) extractLabelNames(labels []Label) []string {
 		names[i] = label.Name
 	}
 	return names
+}
+
+// isFallbackMode checks if we're operating in fallback mode - removed as we don't support fallback
+func (s *GHAListenerScaler) isFallbackMode() bool {
+	return false
+}
+
+// checkAndScaleFallbackMode performs proactive job checking and scaling in fallback mode - removed
+func (s *GHAListenerScaler) checkAndScaleFallbackMode(ctx context.Context) error {
+	return fmt.Errorf("fallback mode not supported")
 } 
