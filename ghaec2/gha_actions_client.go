@@ -313,52 +313,16 @@ func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Cont
 	defer resp.Body.Close()
 	
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Read the response body to provide better error information
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("Actions Service endpoint not available (HTTP %d)", resp.StatusCode)
-		}
-		
-		bodyStr := string(bodyBytes)
-		
-		// Check if response is HTML (common for 404 pages)
-		if strings.Contains(bodyStr, "<html>") || strings.Contains(bodyStr, "<!DOCTYPE") {
-			return nil, fmt.Errorf("Actions Service endpoint not available - GitHub Enterprise Server version may not support this feature (HTTP %d)", resp.StatusCode)
-		}
-		
-		// Try to parse as GitHub API error
-		if strings.Contains(bodyStr, "message") && strings.Contains(bodyStr, "documentation_url") {
-			return nil, fmt.Errorf("Actions Service endpoint not available - API returned: %s (HTTP %d)", strings.TrimSpace(bodyStr), resp.StatusCode)
-		}
-		
-		return nil, fmt.Errorf("Actions Service endpoint not available (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(bodyStr))
-	}
-	
-	// Read response body
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-	
-	responseStr := string(responseBody)
-	
-	// Check if response is HTML instead of JSON
-	if strings.Contains(responseStr, "<html>") || strings.Contains(responseStr, "<!DOCTYPE") {
-		return nil, fmt.Errorf("Actions Service endpoint returned HTML instead of JSON - feature not available on this GitHub Enterprise Server version")
-	}
-	
-	// Check if response is empty or not JSON
-	if len(responseStr) == 0 {
-		return nil, fmt.Errorf("Actions Service endpoint returned empty response - feature not available")
-	}
-	
-	if !strings.HasPrefix(responseStr, "{") {
-		return nil, fmt.Errorf("Actions Service endpoint returned non-JSON response - feature not supported on this GitHub Enterprise Server version")
+		return nil, c.parseErrorResponse(resp)
 	}
 	
 	var conn ActionsServiceAdminConnection
-	if err := json.Unmarshal(responseBody, &conn); err != nil {
-		return nil, fmt.Errorf("Actions Service endpoint returned invalid JSON - feature may not be properly configured: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&conn); err != nil {
+		// Check if the error is likely due to HTML response (common indicator of Actions Service not being available)
+		if strings.Contains(err.Error(), "invalid character '<'") {
+			return nil, fmt.Errorf("Actions Service endpoint returned HTML instead of JSON - GitHub Enterprise Server version may not support this feature")
+		}
+		return nil, fmt.Errorf("failed to decode Actions Service response: %w", err)
 	}
 	
 	c.logger.Info("Successfully obtained Actions Service admin connection")
