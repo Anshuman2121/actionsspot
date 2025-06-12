@@ -43,7 +43,7 @@ type Config struct {
 func LoadConfig() (*Config, error) {
 	config := &Config{
 		GitHubToken:        os.Getenv("GITHUB_TOKEN"),
-		GitHubEnterpriseURL: os.Getenv("GITHUB_ENTERPRISE_URL"),
+		GitHubEnterpriseURL: strings.TrimSuffix(os.Getenv("GITHUB_ENTERPRISE_URL"), "/"),
 		OrganizationName:   os.Getenv("ORGANIZATION_NAME"),
 		RunnerScaleSetName: os.Getenv("RUNNER_SCALE_SET_NAME"),
 		AWSRegion:          os.Getenv("AWS_REGION"),
@@ -123,6 +123,16 @@ func (c *Config) Validate() error {
 		if value == "" {
 			return fmt.Errorf("required environment variable %s is not set", name)
 		}
+	}
+
+	// Validate GitHub token format
+	if !strings.HasPrefix(c.GitHubToken, "ghp_") && !strings.HasPrefix(c.GitHubToken, "ghs_") {
+		return fmt.Errorf("GITHUB_TOKEN must start with 'ghp_' (personal access token) or 'ghs_' (GitHub App token)")
+	}
+
+	// Validate GitHub Enterprise URL format
+	if !strings.HasPrefix(c.GitHubEnterpriseURL, "https://") {
+		return fmt.Errorf("GITHUB_ENTERPRISE_URL must start with 'https://'")
 	}
 	
 	if c.MaxRunners <= 0 {

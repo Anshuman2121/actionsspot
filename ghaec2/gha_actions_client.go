@@ -339,20 +339,28 @@ func (c *ActionsServiceClient) refreshTokenIfNeeded(ctx context.Context) error {
 }
 
 func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org string) (string, error) {
-	path := fmt.Sprintf("/api/v3/orgs/%s/actions/runners/registration-token", org)
-	url := fmt.Sprintf("%s%s", c.baseURL, path)
+	c.logger.Info("Getting registration token", 
+		"organization", org,
+		"baseURL", c.baseURL,
+		"tokenLength", len(c.token))
+
+	url := fmt.Sprintf("%s/api/v3/orgs/%s/actions/runners/registration-token", c.baseURL, org)
 	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	
+	c.logger.Info("Sending registration token request", 
+		"url", url,
+		"authHeader", fmt.Sprintf("token %s", c.token[:4] + "..." + c.token[len(c.token)-4:]))
 	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute request: %w", err)
+		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 	
@@ -360,16 +368,20 @@ func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org str
 		return "", c.parseErrorResponse(resp)
 	}
 	
-	var tokenResp struct {
+	var result struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 	
-	return tokenResp.Token, nil
+	c.logger.Info("Successfully obtained registration token",
+		"expiresAt", result.ExpiresAt,
+		"tokenLength", len(result.Token))
+	
+	return result.Token, nil
 }
 
 type ActionsServiceAdminConnection struct {
@@ -378,37 +390,33 @@ type ActionsServiceAdminConnection struct {
 }
 
 func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Context, regToken string) (*ActionsServiceAdminConnection, error) {
-	apiURL := fmt.Sprintf("%s/api/v3", c.baseURL)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
+	path := "/api/v3/actions/runner-groups/1/runners/registration-token"
+	url := fmt.Sprintf("%s%s", c.baseURL, path)
+	
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
+	
+	req.Header.Set("Authorization", fmt.Sprintf("RemoteAuth %s", regToken))
+	req.Header.Set("Content-Type", "application/json")
+	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get admin connection: %w", err)
+		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-
+	
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseErrorResponse(resp)
 	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+	
+	var conn ActionsServiceAdminConnection
+	if err := json.NewDecoder(resp.Body).Decode(&conn); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-
-	var adminConn ActionsServiceAdminConnection
-	if err := json.Unmarshal(body, &adminConn); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal admin connection: %w", err)
-	}
-
-	return &adminConn, nil
+	
+	return &conn, nil
 }
 
 func (c *ActionsServiceClient) createRunnerScaleSet(ctx context.Context, scaleSet *RunnerScaleSet) (*RunnerScaleSet, error) {
@@ -447,11 +455,53 @@ func (c *ActionsServiceClient) createRunnerScaleSet(ctx context.Context, scaleSe
 }
 
 func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
-	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &ActionsError{
+			StatusCode: resp.StatusCode,
+			ActivityID: resp.Header.Get("X-GitHub-Request-Id"),
+			Message:    fmt.Sprintf("failed to read error response body: %v", err),
+		}
+	}
+
+	var ghErr struct {
+		Message string `json:"message"`
+		Errors  []struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+			Field   string `json:"field"`
+		} `json:"errors"`
+		DocumentationURL string `json:"documentation_url"`
+	}
+
+	if err := json.Unmarshal(body, &ghErr); err != nil {
+		// If we can't parse the JSON, return the raw body
+		return &ActionsError{
+			StatusCode: resp.StatusCode,
+			ActivityID: resp.Header.Get("X-GitHub-Request-Id"),
+			Message:    string(body),
+		}
+	}
+
+	// Build detailed error message
+	var messages []string
+	messages = append(messages, ghErr.Message)
+	for _, e := range ghErr.Errors {
+		if e.Message != "" {
+			messages = append(messages, fmt.Sprintf("%s: %s", e.Field, e.Message))
+		}
+	}
+
+	c.logger.Info("GitHub API error response",
+		"statusCode", resp.StatusCode,
+		"requestId", resp.Header.Get("X-GitHub-Request-Id"),
+		"message", strings.Join(messages, "; "),
+		"documentation", ghErr.DocumentationURL)
+
 	return &ActionsError{
 		StatusCode: resp.StatusCode,
-		ActivityID: resp.Header.Get("X-VSS-ActivityId"),
-		Message:    string(body),
+		ActivityID: resp.Header.Get("X-GitHub-Request-Id"),
+		Message:    strings.Join(messages, "; "),
+		Err:        fmt.Errorf("documentation: %s", ghErr.DocumentationURL),
 	}
 } 
