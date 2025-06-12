@@ -1,281 +1,301 @@
-# GitHub Runner Scaler Lambda
+# GitHub Enterprise Server Runner Scaler Lambda
 
-A serverless solution that automatically scales GitHub Actions runners using AWS Spot instances. This Lambda function polls GitHub Actions every 60 seconds to check for available jobs and creates AWS EC2 Spot instances when runners are needed.
+A serverless solution that automatically scales GitHub Actions self-hosted runners for GitHub Enterprise Server (GHE) using AWS Spot instances. This Lambda function monitors queued workflow runs every 60 seconds and creates AWS EC2 Spot instances when additional runners are needed.
 
 ## Architecture
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   EventBridge   │───▶│  Lambda Function │───▶│ GitHub Actions │
-│  (every 60s)    │    │   (Go Runtime)   │    │      API        │
+│   EventBridge   │───▶│  Lambda Function │───▶│ GitHub Enterprise│
+│  (every 60s)    │    │   (Go Runtime)   │    │     Server      │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                 │
                                 ▼
                        ┌──────────────────┐    ┌─────────────────┐
                        │    DynamoDB      │    │  EC2 Spot       │
-                       │ (Sessions/State) │    │   Instances     │
+                       │  (Runner State)  │    │   Instances     │
                        └──────────────────┘    └─────────────────┘
 ```
 
 ## Features
 
-- **Automatic Scaling**: Monitors GitHub Actions job queue and scales runners accordingly
+- **Automatic Scaling**: Monitors GitHub Enterprise workflow queue and scales runners accordingly
 - **Cost Optimization**: Uses EC2 Spot instances for significant cost savings (up to 90% off)
 - **Serverless**: No infrastructure to manage, only pay for compute time used
-- **GitHub Integration**: Native integration with GitHub Actions scale sets
-- **State Management**: Tracks runner state and sessions in DynamoDB
+- **GHE Integration**: Native integration with GitHub Enterprise Server API
+- **State Management**: Tracks runner state in DynamoDB
+- **Intelligent Cleanup**: Automatically removes offline runners to optimize costs
 - **Configurable**: Support for custom runner labels, instance types, and scaling limits
 
 ## Prerequisites
 
-1. **GitHub App**: Create a GitHub App with the following permissions:
-   - Actions: Read
-   - Administration: Read & Write
-   - Metadata: Read
+1. **GitHub Enterprise Server**: Access to your GHE instance with API access
+2. **Personal Access Token**: GitHub token with `repo` and `admin:org` scopes
+3. **AWS Account**: With permissions to create Lambda, EC2, DynamoDB, IAM resources
+4. **VPC Setup**: Subnet and security group for EC2 instances
 
-2. **AWS Account**: With permissions to create:
-   - Lambda functions
-   - EC2 instances
-   - DynamoDB tables
-   - IAM roles and policies
-   - EventBridge rules
+## Quick Start
 
-3. **GitHub Runner Scale Set**: Set up a runner scale set in your GitHub organization
-
-## Setup
-
-### 1. Clone and Configure
+### 1. Clone and Build
 
 ```bash
 cd lambda/github-runner-scaler
+./deploy.sh build-only
 ```
 
 ### 2. Create terraform.tfvars
 
 ```hcl
 # terraform/terraform.tfvars
-aws_region                   = "us-east-1"
-github_app_id               = "123456"
-github_app_installation_id = "789012"
-github_app_private_key      = <<EOF
------BEGIN RSA PRIVATE KEY-----
-your-private-key-here
------END RSA PRIVATE KEY-----
-EOF
-runner_scale_set_id         = "1"
-min_runners                 = 0
-max_runners                 = 10
-ec2_instance_type           = "t3.medium"
-ec2_ami_id                 = "ami-0abcdef1234567890"  # Ubuntu 22.04 LTS
-ec2_subnet_id              = "subnet-12345678"
-ec2_key_pair_name          = "my-key-pair"
-runner_labels              = ["self-hosted", "linux", "x64"]
+aws_region                  = "us-east-1"
+github_token               = "ghp_xxxxxxxxxxxxxxxxxxxx"
+github_enterprise_url      = "https://TelenorSwedenAB.ghe.com"
+organization_name          = "TelenorSweden"
+min_runners                = 1
+max_runners                = 10
+ec2_instance_type          = "t3.medium"
+ec2_ami_id                = "ami-0abcdef1234567890"  # Ubuntu 22.04 LTS
+ec2_subnet_id             = "subnet-12345678"
+ec2_key_pair_name         = "my-key-pair"
+runner_labels             = ["self-hosted", "linux", "x64"]
+cleanup_offline_runners   = true
 ```
 
-### 3. Deploy
+### 3. Deploy Infrastructure
 
 ```bash
-chmod +x deploy.sh
-./deploy.sh
+cd terraform
+terraform init
+terraform plan
+terraform apply
 ```
 
-## Configuration
+## Configuration Variables
 
-### Environment Variables
+### Required Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `GITHUB_APP_ID` | GitHub App ID | Yes | - |
-| `GITHUB_APP_INSTALLATION_ID` | Installation ID for your organization | Yes | - |
-| `GITHUB_APP_PRIVATE_KEY` | Private key for GitHub App authentication | Yes | - |
-| `RUNNER_SCALE_SET_ID` | ID of the runner scale set | Yes | - |
-| `MIN_RUNNERS` | Minimum number of runners to maintain | No | 0 |
-| `MAX_RUNNERS` | Maximum number of runners allowed | No | 10 |
-| `EC2_INSTANCE_TYPE` | EC2 instance type for runners | No | t3.medium |
-| `EC2_AMI_ID` | AMI ID for runner instances | Yes | - |
-| `EC2_SUBNET_ID` | Subnet ID for instances | Yes | - |
-| `EC2_SECURITY_GROUP_ID` | Security group for instances | Yes | - |
-| `EC2_KEY_PAIR_NAME` | EC2 key pair name | Yes | - |
-| `EC2_SPOT_PRICE` | Maximum spot price | No | 0.05 |
-| `DYNAMODB_TABLE_NAME` | DynamoDB table for tracking | No | github-runners |
-| `RUNNER_LABELS` | JSON array of runner labels | No | ["self-hosted","linux","x64"] |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `github_token` | Personal access token with repo and admin:org scopes | `ghp_xxxxxxxxxxxx` |
+| `github_enterprise_url` | Your GHE instance URL | `https://github.company.com` |
+| `organization_name` | GitHub organization name | `MyCompany` |
+| `ec2_ami_id` | AMI ID with GitHub runner pre-installed | `ami-0abcdef123456` |
+| `ec2_subnet_id` | VPC subnet for EC2 instances | `subnet-12345678` |
 
-### Scaling Logic
+### Optional Variables
 
-The Lambda function calculates the number of needed runners based on:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `aws_region` | AWS region for deployment | `us-east-1` |
+| `min_runners` | Minimum runners to maintain | `1` |
+| `max_runners` | Maximum runners allowed | `10` |
+| `ec2_instance_type` | Instance type for runners | `t3.medium` |
+| `ec2_key_pair_name` | EC2 key pair for SSH access | `""` |
+| `runner_labels` | Labels for the runners | `["self-hosted", "linux", "x64"]` |
+| `cleanup_offline_runners` | Remove offline runners | `true` |
 
-1. **Available Jobs**: Jobs waiting in the GitHub Actions queue
-2. **Current Statistics**: Number of assigned vs registered runners
-3. **Minimum Runners**: Maintain at least the configured minimum
-4. **Maximum Runners**: Never exceed the configured maximum
+## GitHub Token Setup
 
-Formula:
+### 1. Create Personal Access Token
+
+1. Go to your GHE instance: `https://your-ghe.com/settings/tokens`
+2. Click "Generate new token"
+3. Select scopes:
+   - ✅ `repo` (Full control of private repositories)
+   - ✅ `admin:org` (Full control of orgs and teams)
+4. Copy the generated token
+
+### 2. Test Token Access
+
+```bash
+# Test API access
+curl -H "Authorization: token ghp_xxxxxxxxxxxx" \
+  https://your-ghe.com/api/v3/orgs/YourOrg/actions/runners
+
+# Test workflow runs access
+curl -H "Authorization: token ghp_xxxxxxxxxxxx" \
+  https://your-ghe.com/api/v3/orgs/YourOrg/actions/runs?status=queued
 ```
-needed = available_jobs + assigned_jobs - registered_runners
-needed = max(needed, min_runners)
-needed = min(needed, max_runners)
+
+## AMI Setup
+
+### Option 1: Use Pre-built AMI
+
+Find an Ubuntu 22.04 LTS AMI with GitHub Actions runner pre-installed:
+
+```bash
+# Find Ubuntu 22.04 LTS AMI in your region
+aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+  --query 'Images[*].[ImageId,Name,CreationDate]' \
+  --output table
 ```
 
-## GitHub App Setup
+### Option 2: Create Custom AMI
 
-### 1. Create GitHub App
-
-1. Go to GitHub Settings > Developer settings > GitHub Apps
-2. Click "New GitHub App"
-3. Configure:
-   - **Name**: `my-org-runner-scaler`
-   - **Homepage URL**: Your organization URL
-   - **Webhook**: Disable for now
-   - **Permissions**:
-     - Actions: Read
-     - Administration: Read & Write
-     - Metadata: Read
-   - **Where can this GitHub App be installed?**: Only on this account
-
-### 2. Generate Private Key
-
-1. In your GitHub App settings, scroll to "Private keys"
-2. Click "Generate a private key"
-3. Download the `.pem` file and use its contents for `github_app_private_key`
-
-### 3. Install the App
-
-1. In your GitHub App settings, click "Install App"
-2. Choose your organization
-3. Select repositories or "All repositories"
-4. Note the installation ID from the URL
-
-## AMI Requirements
-
-The EC2 AMI should have:
-
-- Ubuntu 22.04 LTS (recommended)
-- Docker installed and configured
-- AWS CLI installed
-- GitHub Actions runner dependencies
-
-### Example AMI Creation Script
+Launch an EC2 instance and run:
 
 ```bash
 #!/bin/bash
-# User data script for creating GitHub Actions runner AMI
+# User data script for GitHub Actions runner AMI
 
 # Update system
-apt-get update -y
-apt-get upgrade -y
+sudo apt-get update -y
+sudo apt-get upgrade -y
 
 # Install Docker
-apt-get install -y docker.io
-systemctl enable docker
-systemctl start docker
-usermod -aG docker ubuntu
+sudo apt-get install -y docker.io
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo usermod -aG docker ubuntu
+
+# Install dependencies
+sudo apt-get install -y curl jq git build-essential unzip
 
 # Install AWS CLI
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 unzip awscliv2.zip
-./aws/install
+sudo ./aws/install
 
-# Install GitHub Actions runner dependencies
-apt-get install -y curl jq git build-essential
+# Install GitHub Actions runner
+cd /opt
+sudo mkdir actions-runner && cd actions-runner
+sudo wget https://github.com/actions/runner/releases/download/v2.311.0/actions-runner-linux-x64-2.311.0.tar.gz
+sudo tar xzf ./actions-runner-linux-x64-2.311.0.tar.gz
+sudo ./bin/installdependencies.sh
 
 # Create runner user
-useradd -m -s /bin/bash runner
-usermod -aG docker runner
+sudo useradd -m -s /bin/bash runner
+sudo usermod -aG docker runner
+sudo chown -R runner:runner /opt/actions-runner
 ```
 
-## Monitoring
+Then create an AMI from this instance.
+
+## Scaling Logic
+
+The Lambda function uses intelligent scaling based on:
+
+### 1. Demand Analysis
+- Monitors queued workflow runs via GHE API
+- Counts jobs waiting for available runners
+- Analyzes current runner capacity and utilization
+
+### 2. Supply Calculation
+- Gets current registered runners from GHE
+- Identifies idle vs busy runners
+- Factors in offline runners for cleanup
+
+### 3. Scaling Decision
+```go
+// Simplified scaling logic
+queuedJobs := len(getQueuedWorkflowRuns())
+idleRunners := getCurrentIdleRunners()
+busyRunners := getCurrentBusyRunners()
+
+needed := queuedJobs - idleRunners
+if needed > 0 && (busyRunners + idleRunners) < maxRunners {
+    createRunners(needed)
+}
+```
+
+## Monitoring and Troubleshooting
 
 ### CloudWatch Logs
 
-Monitor Lambda execution logs:
+Monitor Lambda execution:
 ```bash
 aws logs tail /aws/lambda/github-runner-scaler --follow
 ```
 
+Key log messages to watch for:
+- `✅ Found X queued workflow runs requiring runners`
+- `🚀 Creating X new runners for pending jobs`
+- `🧹 Cleaning up X offline runners`
+- `⚠️ Rate limit reached, backing off`
+
 ### DynamoDB Tables
 
-- `github-runners`: Tracks individual runner instances
-- `github-runners-sessions`: Stores GitHub message session data
-
-### CloudWatch Metrics
-
-Key metrics to monitor:
-- Lambda duration and errors
-- EC2 Spot instance requests
-- DynamoDB read/write units
-
-## Troubleshooting
+- **github-runners**: Tracks runner instances and their state
+- **github-runners-sessions**: Stores API session data (if using runner scale sets)
 
 ### Common Issues
 
-1. **GitHub Authentication Errors**
-   - Verify GitHub App private key format
-   - Check installation ID is correct
-   - Ensure app has required permissions
+#### 1. No Runners Created
+- Check GitHub token permissions
+- Verify GHE API accessibility from Lambda
+- Check VPC/subnet configuration for EC2 instances
 
-2. **EC2 Spot Request Failures**
-   - Check spot price limits
-   - Verify subnet and security group exist
-   - Ensure AMI is available in the region
+#### 2. Authentication Errors
+```bash
+# Test token locally
+curl -H "Authorization: token $GITHUB_TOKEN" \
+  $GITHUB_ENTERPRISE_URL/api/v3/user
+```
 
-3. **Runner Registration Failures**
-   - Verify AMI has required dependencies
-   - Check security group allows outbound traffic
-   - Ensure runner registration token is valid
+#### 3. Spot Instance Failures
+- Check spot price limits
+- Verify AMI ID exists in your region
+- Ensure subnet has available IP addresses
 
-### Debug Mode
+### Testing
 
-Enable debug logging by setting CloudWatch log level to DEBUG:
+Use the included test workflows:
 
 ```bash
-aws logs put-retention-policy \
-  --log-group-name /aws/lambda/github-runner-scaler \
-  --retention-in-days 7
+# Trigger test workflow
+gh workflow run test-runner-scaling.yml
+
+# Monitor scaling
+aws logs tail /aws/lambda/github-runner-scaler --follow
 ```
 
 ## Cost Optimization
 
 ### Spot Instance Savings
-
-- Spot instances can save 50-90% compared to on-demand
-- Configure appropriate spot price limits
-- Monitor spot price history for your instance types
+- **On-Demand t3.medium**: ~$0.0416/hour
+- **Spot t3.medium**: ~$0.0125/hour (70% savings)
+- **Annual savings**: ~$268 per runner
 
 ### Lambda Costs
+- **Execution time**: ~5 seconds per run
+- **Memory**: 512MB
+- **Monthly invocations**: ~43,200 (every minute)
+- **Monthly cost**: ~$0.50
 
-- Function typically runs for 5-30 seconds
-- EventBridge triggers every 60 seconds
-- Estimated monthly cost: $5-15 for moderate usage
+### Total Cost Example
+For 5 average runners running 8 hours/day:
+- **Spot instances**: $36.50/month
+- **Lambda**: $0.50/month
+- **DynamoDB**: $1.00/month
+- **Total**: ~$38/month vs $150/month with on-demand
 
-### DynamoDB Costs
+## Security Best Practices
 
-- Pay-per-request pricing
-- Minimal storage for session and runner state
-- Estimated monthly cost: $1-5
+1. **Minimal IAM Permissions**: Use least privilege principle
+2. **VPC Security Groups**: Restrict network access
+3. **Token Rotation**: Regularly rotate GitHub tokens
+4. **Private Subnets**: Deploy runners in private subnets when possible
+5. **Encryption**: Enable encryption for DynamoDB and EBS volumes
 
-## Security Considerations
+## Deployment Guide
 
-1. **Private Key Storage**: Store GitHub App private key securely
-2. **IAM Permissions**: Follow principle of least privilege
-3. **VPC Configuration**: Place runners in private subnets
-4. **Security Groups**: Restrict inbound access to necessary ports
-5. **Instance Profiles**: Limit EC2 permissions to essential operations
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for detailed setup instructions including:
+- AWS account setup
+- VPC configuration
+- Security group setup
+- AMI creation
+- Terraform deployment
 
 ## Support
 
 For issues and questions:
-1. Check the troubleshooting section
-2. Review CloudWatch logs
-3. Open an issue with detailed error information 
+1. Check CloudWatch logs first
+2. Verify configuration in terraform.tfvars
+3. Test GitHub API access manually
+4. Review security group and VPC settings
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details. 
