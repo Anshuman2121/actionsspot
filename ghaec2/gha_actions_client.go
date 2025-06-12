@@ -611,7 +611,10 @@ func (c *ActionsServiceClient) GetMessage(ctx context.Context, messageQueueURL, 
 	u.RawQuery = params.Encode()
 	finalURL := u.String()
 	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, nil)
+	// Create empty JSON body for POST request
+	emptyBody := strings.NewReader("{}")
+	
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, emptyBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -944,7 +947,7 @@ func (c *ActionsServiceClient) DeleteMessageSession(ctx context.Context, runnerS
 		return nil // Nothing to delete
 	}
 	
-	url := fmt.Sprintf("%s/%s/%d/sessions/%s", c.actionsServiceURL, scaleSetEndpoint, runnerScaleSetID, sessionID.String())
+	url := fmt.Sprintf("%s/%s/%d/sessions/%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, runnerScaleSetID, sessionID.String(), apiVersion)
 	resp, err := c.makeActionsServiceRequest(ctx, "DELETE", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete message session: %w", err)
