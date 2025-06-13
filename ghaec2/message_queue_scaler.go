@@ -183,32 +183,60 @@ func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
 	// Start the message polling loop (exactly like Listener.Listen)
 	s.logger.Info("Starting message polling loop")
 
+	// Add a ticker for more frequent polling when no messages are received
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Add a diagnostic ticker to periodically check for issues
+	diagnosticTicker := time.NewTicker(2 * time.Minute)
+	defer diagnosticTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-ticker.C:
+			// Periodic polling attempt
+			s.logger.V(1).Info("Periodic message poll check")
+		case <-diagnosticTicker.C:
+			// Run diagnostics periodically
+			if err := s.runDiagnostics(ctx); err != nil {
+				s.logger.Error(err, "Diagnostics failed")
+			}
 		default:
 		}
 
 		// Get next message (like Listener.getMessage)
 		msg, err := s.getMessage(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to get message: %w", err)
+			s.logger.Error(err, "Failed to get message, will retry in 5 seconds")
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
 		if msg == nil {
 			// No new messages - handle as null message (like Listener.Listen)
+			s.logger.V(1).Info("No new messages received, handling as null message")
 			_, err := s.handleDesiredRunnerCount(ctx, 0, 0)
 			if err != nil {
-				return fmt.Errorf("handling nil message failed: %w", err)
+				s.logger.Error(err, "Failed to handle null message")
+				continue
 			}
+			time.Sleep(5 * time.Second) // Wait before next poll
 			continue
 		}
+
+		s.logger.Info("Received message", 
+			"messageId", msg.MessageID, 
+			"messageType", msg.MessageType,
+			"bodyLength", len(msg.Body),
+			"hasStatistics", msg.Statistics != nil)
 
 		// Handle the message (like Listener.handleMessage)
 		// Use context.WithoutCancel to avoid cancelling message handling
 		if err := s.handleMessage(context.WithoutCancel(ctx), msg); err != nil {
-			return fmt.Errorf("failed to handle message: %w", err)
+			s.logger.Error(err, "Failed to handle message, will continue polling")
+			continue
 		}
 	}
 }
@@ -340,9 +368,14 @@ func (s *MessageQueueScaler) parseMessage(ctx context.Context, msg *RunnerScaleS
 	// Parse batched messages in the body
 	var batchedMessages []json.RawMessage
 	if len(msg.Body) > 0 {
+		s.logger.Info("Message has body content", "bodyLength", len(msg.Body), "body", msg.Body)
 		if err := json.Unmarshal([]byte(msg.Body), &batchedMessages); err != nil {
+			s.logger.Error(err, "Failed to unmarshal batched messages", "body", msg.Body)
 			return nil, fmt.Errorf("failed to unmarshal batched messages: %w", err)
 		}
+		s.logger.Info("Parsed batched messages", "count", len(batchedMessages))
+	} else {
+		s.logger.Info("Message has empty body")
 	}
 
 	parsedMsg := &parsedMessage{
@@ -350,30 +383,54 @@ func (s *MessageQueueScaler) parseMessage(ctx context.Context, msg *RunnerScaleS
 	}
 
 	// Parse individual messages (like Listener.parseMessage)
-	for _, rawMsg := range batchedMessages {
+	for i, rawMsg := range batchedMessages {
 		var msgType struct {
 			MessageType string `json:"messageType"`
 		}
 		if err := json.Unmarshal(rawMsg, &msgType); err != nil {
+			s.logger.Error(err, "Failed to unmarshal message type", "index", i, "rawMessage", string(rawMsg))
 			continue
 		}
+
+		s.logger.Info("Processing batched message", "index", i, "messageType", msgType.MessageType)
 
 		switch msgType.MessageType {
 		case "JobAvailable":
 			var jobAvailable JobAvailable
 			if err := json.Unmarshal(rawMsg, &jobAvailable); err == nil {
+				s.logger.Info("Found JobAvailable message", 
+					"runnerRequestId", jobAvailable.RunnerRequestID,
+					"repositoryName", jobAvailable.RepositoryName,
+					"ownerName", jobAvailable.OwnerName,
+					"requestLabels", jobAvailable.RequestLabels)
 				parsedMsg.jobsAvailable = append(parsedMsg.jobsAvailable, &jobAvailable)
+			} else {
+				s.logger.Error(err, "Failed to unmarshal JobAvailable message", "rawMessage", string(rawMsg))
 			}
 		case "JobStarted":
 			var jobStarted JobStarted
 			if err := json.Unmarshal(rawMsg, &jobStarted); err == nil {
+				s.logger.Info("Found JobStarted message", 
+					"runnerRequestId", jobStarted.RunnerRequestID,
+					"runnerId", jobStarted.RunnerID,
+					"runnerName", jobStarted.RunnerName)
 				parsedMsg.jobsStarted = append(parsedMsg.jobsStarted, &jobStarted)
+			} else {
+				s.logger.Error(err, "Failed to unmarshal JobStarted message", "rawMessage", string(rawMsg))
 			}
 		case "JobCompleted":
 			var jobCompleted JobCompleted
 			if err := json.Unmarshal(rawMsg, &jobCompleted); err == nil {
+				s.logger.Info("Found JobCompleted message", 
+					"runnerRequestId", jobCompleted.RunnerRequestID,
+					"runnerId", jobCompleted.RunnerID,
+					"result", jobCompleted.Result)
 				parsedMsg.jobsCompleted = append(parsedMsg.jobsCompleted, &jobCompleted)
+			} else {
+				s.logger.Error(err, "Failed to unmarshal JobCompleted message", "rawMessage", string(rawMsg))
 			}
+		default:
+			s.logger.Info("Unknown message type in batch", "messageType", msgType.MessageType, "rawMessage", string(rawMsg))
 		}
 	}
 
@@ -630,4 +687,47 @@ func isMessageQueueTokenExpiredError(err error) bool {
 	// TODO: Implement proper error type checking
 	return err != nil && (err.Error() == "message queue token expired" ||
 		err.Error() == "unauthorized")
+}
+
+// runDiagnostics runs diagnostic checks to help troubleshoot issues
+func (s *MessageQueueScaler) runDiagnostics(ctx context.Context) error {
+	s.logger.Info("Running diagnostics to troubleshoot message queue issues")
+
+	// Check acquirable jobs directly
+	acquirableJobs, err := s.actionsClient.GetAcquirableJobs(ctx, s.config.RunnerScaleSetID)
+	if err != nil {
+		s.logger.Error(err, "Failed to get acquirable jobs")
+	} else {
+		s.logger.Info("Acquirable jobs check", 
+			"count", acquirableJobs.Count,
+			"jobs", len(acquirableJobs.Jobs))
+		
+		for i, job := range acquirableJobs.Jobs {
+			s.logger.Info("Available job", 
+				"index", i,
+				"runnerRequestId", job.RunnerRequestID,
+				"repositoryName", job.RepositoryName,
+				"ownerName", job.OwnerName,
+				"requestLabels", job.RequestLabels,
+				"jobWorkflowRef", job.JobWorkflowRef)
+		}
+	}
+
+	// Log current scale set configuration
+	s.logger.Info("Current scale set configuration",
+		"scaleSetId", s.config.RunnerScaleSetID,
+		"scaleSetName", s.config.RunnerScaleSetName,
+		"runnerLabels", s.config.RunnerLabels,
+		"minRunners", s.config.MinRunners,
+		"maxRunners", s.config.MaxRunners)
+
+	// Log session information
+	if s.session != nil {
+		s.logger.Info("Current message session",
+			"sessionId", s.session.SessionID,
+			"messageQueueUrl", s.session.MessageQueueURL,
+			"lastMessageId", s.lastMessageID)
+	}
+
+	return nil
 }

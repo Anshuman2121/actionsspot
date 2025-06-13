@@ -616,6 +616,11 @@ func (c *ActionsServiceClient) GetMessage(ctx context.Context, messageQueueURL, 
 		return nil, fmt.Errorf("maxCapacity must be greater than or equal to 0")
 	}
 
+	c.logger.V(1).Info("Making message queue request", 
+		"url", u.String(), 
+		"lastMessageId", lastMessageID, 
+		"maxCapacity", maxCapacity)
+
 	// Use GET method like official implementation
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -630,23 +635,49 @@ func (c *ActionsServiceClient) GetMessage(ctx context.Context, messageQueueURL, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.logger.Error(err, "Failed to execute message queue request")
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	c.logger.V(1).Info("Message queue response", 
+		"statusCode", resp.StatusCode,
+		"contentType", resp.Header.Get("Content-Type"),
+		"requestId", resp.Header.Get("X-GitHub-Request-Id"))
+
 	// Handle StatusAccepted like official implementation
 	if resp.StatusCode == http.StatusAccepted {
+		c.logger.V(1).Info("No messages available (HTTP 202)")
 		return nil, nil // No messages
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		c.logger.Error(nil, "Message queue request failed", 
+			"statusCode", resp.StatusCode,
+			"requestId", resp.Header.Get("X-GitHub-Request-Id"))
 		return nil, c.parseErrorResponse(resp)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	c.logger.V(1).Info("Message queue response body", 
+		"bodyLength", len(body),
+		"body", string(body))
+
 	var message RunnerScaleSetMessage
-	if err := json.NewDecoder(resp.Body).Decode(&message); err != nil {
+	if err := json.Unmarshal(body, &message); err != nil {
+		c.logger.Error(err, "Failed to unmarshal message", "body", string(body))
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
+
+	c.logger.Info("Successfully received message", 
+		"messageId", message.MessageID,
+		"messageType", message.MessageType,
+		"hasStatistics", message.Statistics != nil,
+		"bodyLength", len(message.Body))
 
 	return &message, nil
 }
