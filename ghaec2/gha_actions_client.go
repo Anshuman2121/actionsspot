@@ -485,7 +485,7 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 		c.logger.Error(err, "Failed to list existing scale sets (non-fatal)")
 	}
 
-	// Try to get existing scale set first
+	// Try to get existing scale set first (by name or compatible labels)
 	existingScaleSet, err := c.findExistingScaleSet(ctx, name, labels)
 	if err != nil {
 		c.logger.Error(err, "Failed to find existing scale set")
@@ -496,6 +496,20 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 			"name", existingScaleSet.Name,
 			"labels", c.extractLabelNames(existingScaleSet.Labels))
 		return existingScaleSet, nil
+	}
+
+	// If looking for a specific existing scale set by name, try to find it even if labels don't match
+	if existingByName := c.findExistingScaleSetByName(ctx, name); existingByName != nil {
+		c.logger.Info("Found existing scale set by name (ignoring label compatibility)", 
+			"id", existingByName.ID, 
+			"name", existingByName.Name,
+			"labels", c.extractLabelNames(existingByName.Labels))
+		return existingByName, nil
+	}
+
+	// Only try to create if we have a meaningful name and labels
+	if name == "" || len(labels) == 0 {
+		return nil, fmt.Errorf("cannot create scale set: name and labels are required")
 	}
 
 	// Create labels array
@@ -536,6 +550,14 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 	c.logger.Info("Scale set creation response", 
 		"statusCode", resp.StatusCode,
 		"body", string(body))
+
+	// If creation fails due to permissions, suggest using existing scale set
+	if resp.StatusCode == http.StatusForbidden {
+		c.logger.Error(nil, "Scale set creation failed due to insufficient permissions", 
+			"statusCode", resp.StatusCode,
+			"suggestion", "Use an existing scale set or get admin permissions")
+		return nil, fmt.Errorf("insufficient permissions to create scale set. Try using an existing scale set like 'arc-runner-set'")
+	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("failed to create scale set (status %d): %s", resp.StatusCode, string(body))
@@ -604,6 +626,38 @@ func (c *ActionsServiceClient) findExistingScaleSet(ctx context.Context, name st
 	}
 
 	return nil, nil // No matching scale set found
+}
+
+// findExistingScaleSetByName finds a scale set by exact name match
+func (c *ActionsServiceClient) findExistingScaleSetByName(ctx context.Context, name string) *RunnerScaleSet {
+	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
+	resp, err := c.makeActionsServiceRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var response struct {
+		Count int               `json:"count"`
+		Value []RunnerScaleSet `json:"value"`
+	}
+	
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil
+	}
+
+	for _, ss := range response.Value {
+		if ss.Name == name {
+			return &ss
+		}
+	}
+
+	return nil
 }
 
 // labelsMatch checks if existing labels are compatible with requested labels
