@@ -112,7 +112,7 @@ func (s *MessageQueueScaler) initializeActionsService(ctx context.Context) error
 func (s *MessageQueueScaler) initializeScaleSet(ctx context.Context) error {
 	s.logger.Info("Initializing runner scale set", "name", s.config.RunnerScaleSetName)
 
-	scaleSet, err := s.actionsClient.GetOrCreateRunnerScaleSet(ctx, s.config.RunnerScaleSetName, s.config.RunnerLabels)
+	scaleSet, err := s.actionsClient.GetOrCreateRunnerScaleSet(ctx, s.config.RunnerScaleSetName, s.config.RunnerLabels, s.config.RunnerGroupID)
 	if err != nil {
 		return fmt.Errorf("failed to get or create scale set: %w", err)
 	}
@@ -123,6 +123,7 @@ func (s *MessageQueueScaler) initializeScaleSet(ctx context.Context) error {
 	s.logger.Info("Scale set initialized",
 		"id", scaleSet.ID,
 		"name", scaleSet.Name,
+		"runnerGroupId", scaleSet.RunnerGroupID,
 		"labels", s.extractLabelNames(scaleSet.Labels),
 	)
 

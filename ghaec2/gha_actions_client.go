@@ -477,8 +477,8 @@ func (c *ActionsServiceClient) refreshTokenIfNeeded(ctx context.Context) error {
 }
 
 // GetOrCreateRunnerScaleSet gets or creates a runner scale set
-func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, name string, labels []string) (*RunnerScaleSet, error) {
-	c.logger.Info("Getting or creating runner scale set", "name", name)
+func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, name string, labels []string, runnerGroupID int) (*RunnerScaleSet, error) {
+	c.logger.Info("Getting or creating runner scale set", "name", name, "runnerGroupId", runnerGroupID)
 
 	// First, try to list existing scale sets for debugging
 	if err := c.listExistingScaleSets(ctx); err != nil {
@@ -508,8 +508,9 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 	}
 
 	payload := map[string]interface{}{
-		"name":   name,
-		"labels": labelsArray,
+		"name":          name,
+		"runnerGroupId": runnerGroupID,  // Add runner group ID
+		"labels":        labelsArray,
 		"runnerSetting": map[string]interface{}{
 			"ephemeral":     true,
 			"isElastic":     true,
@@ -517,7 +518,7 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 		},
 	}
 
-	c.logger.Info("Creating new scale set", "name", name, "labels", labels)
+	c.logger.Info("Creating new scale set", "name", name, "labels", labels, "runnerGroupId", runnerGroupID)
 
 	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
 	resp, err := c.makeActionsServiceRequest(ctx, http.MethodPost, url, payload)

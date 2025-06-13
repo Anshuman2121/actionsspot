@@ -26,6 +26,7 @@ type Config struct {
 	// Runner Scale Set Configuration
 	RunnerScaleSetID   int
 	RunnerScaleSetName string
+	RunnerGroupID      int
 	MinRunners         int
 	MaxRunners         int
 
@@ -72,6 +73,15 @@ func LoadConfig() (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid RUNNER_SCALE_SET_ID: %w", err)
 		}
+	}
+
+	if runnerGroupID := os.Getenv("RUNNER_GROUP_ID"); runnerGroupID != "" {
+		config.RunnerGroupID, err = strconv.Atoi(runnerGroupID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RUNNER_GROUP_ID: %w", err)
+		}
+	} else {
+		config.RunnerGroupID = 1 // Default to "Default" group
 	}
 
 	if minRunners := os.Getenv("MIN_RUNNERS"); minRunners != "" {
