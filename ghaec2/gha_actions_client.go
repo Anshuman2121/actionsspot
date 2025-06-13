@@ -485,6 +485,19 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 		c.logger.Error(err, "Failed to list existing scale sets (non-fatal)")
 	}
 
+	// Try to get existing scale set first
+	existingScaleSet, err := c.findExistingScaleSet(ctx, name, labels)
+	if err != nil {
+		c.logger.Error(err, "Failed to find existing scale set")
+	}
+	if existingScaleSet != nil {
+		c.logger.Info("Found compatible existing scale set", 
+			"id", existingScaleSet.ID, 
+			"name", existingScaleSet.Name,
+			"labels", c.extractLabelNames(existingScaleSet.Labels))
+		return existingScaleSet, nil
+	}
+
 	// Create labels array
 	labelsArray := make([]map[string]interface{}, len(labels))
 	for i, label := range labels {
@@ -504,6 +517,8 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 		},
 	}
 
+	c.logger.Info("Creating new scale set", "name", name, "labels", labels)
+
 	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
 	resp, err := c.makeActionsServiceRequest(ctx, http.MethodPost, url, payload)
 	if err != nil {
@@ -511,13 +526,102 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 	}
 	defer resp.Body.Close()
 
+	// Read the response body for debugging
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	c.logger.Info("Scale set creation response", 
+		"statusCode", resp.StatusCode,
+		"body", string(body))
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("failed to create scale set (status %d): %s", resp.StatusCode, string(body))
+	}
+
 	var scaleSet RunnerScaleSet
-	if err := json.NewDecoder(resp.Body).Decode(&scaleSet); err != nil {
+	if err := json.Unmarshal(body, &scaleSet); err != nil {
 		return nil, fmt.Errorf("failed to decode scale set response: %w", err)
 	}
 
-	c.logger.Info("Scale set created/retrieved", "id", scaleSet.ID, "name", scaleSet.Name)
+	// Validate the response
+	if scaleSet.ID == 0 || scaleSet.Name == "" {
+		return nil, fmt.Errorf("invalid scale set response: ID=%d, Name='%s'", scaleSet.ID, scaleSet.Name)
+	}
+
+	c.logger.Info("Scale set created successfully", "id", scaleSet.ID, "name", scaleSet.Name)
 	return &scaleSet, nil
+}
+
+// findExistingScaleSet tries to find an existing scale set that matches name or labels
+func (c *ActionsServiceClient) findExistingScaleSet(ctx context.Context, name string, requestedLabels []string) (*RunnerScaleSet, error) {
+	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
+	resp, err := c.makeActionsServiceRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list scale sets: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse the response
+	var response struct {
+		Count int               `json:"count"`
+		Value []RunnerScaleSet `json:"value"`
+	}
+	
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse scale sets response: %w", err)
+	}
+
+	c.logger.Info("Found existing scale sets", "count", response.Count)
+	for i, ss := range response.Value {
+		existingLabels := c.extractLabelNames(ss.Labels)
+		c.logger.Info("Existing scale set", 
+			"index", i, 
+			"id", ss.ID, 
+			"name", ss.Name,
+			"labels", existingLabels)
+
+		// Check if this scale set matches by name
+		if ss.Name == name {
+			c.logger.Info("Found scale set by name match", "name", name)
+			return &ss, nil
+		}
+
+		// Check if this scale set has compatible labels
+		if c.labelsMatch(existingLabels, requestedLabels) {
+			c.logger.Info("Found scale set with compatible labels", 
+				"existing", existingLabels, 
+				"requested", requestedLabels)
+			return &ss, nil
+		}
+	}
+
+	return nil, nil // No matching scale set found
+}
+
+// labelsMatch checks if existing labels are compatible with requested labels
+func (c *ActionsServiceClient) labelsMatch(existing, requested []string) bool {
+	// For now, require exact match of all requested labels
+	// This could be made more flexible later
+	
+	existingSet := make(map[string]bool)
+	for _, label := range existing {
+		existingSet[label] = true
+	}
+
+	for _, reqLabel := range requested {
+		if !existingSet[reqLabel] {
+			return false
+		}
+	}
+
+	return len(requested) > 0 // Only match if there are requested labels
 }
 
 // listExistingScaleSets lists existing scale sets for debugging
