@@ -478,35 +478,87 @@ func (c *ActionsServiceClient) refreshTokenIfNeeded(ctx context.Context) error {
 
 // GetOrCreateRunnerScaleSet gets or creates a runner scale set
 func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, name string, labels []string) (*RunnerScaleSet, error) {
-	if err := c.refreshTokenIfNeeded(ctx); err != nil {
-		return nil, fmt.Errorf("failed to refresh token: %w", err)
-	}
-
 	c.logger.Info("Getting or creating runner scale set", "name", name)
 
-	// For now, return a mock scale set - in a real implementation,
-	// this would call the actual scale set creation APIs
-	scaleSet := &RunnerScaleSet{
-		ID:            1,
-		Name:          name,
-		RunnerGroupID: 1,
-		Labels:        make([]Label, len(labels)),
-		RunnerSetting: RunnerSetting{
-			Ephemeral: true,
-			IsElastic: true,
-		},
+	// First, try to list existing scale sets for debugging
+	if err := c.listExistingScaleSets(ctx); err != nil {
+		c.logger.Error(err, "Failed to list existing scale sets (non-fatal)")
 	}
 
-	// Convert string labels to Label objects
+	// Create labels array
+	labelsArray := make([]map[string]interface{}, len(labels))
 	for i, label := range labels {
-		scaleSet.Labels[i] = Label{
-			ID:   i + 1,
-			Name: label,
-			Type: "custom",
+		labelsArray[i] = map[string]interface{}{
+			"name": label,
+			"type": "User",
 		}
 	}
 
-	return scaleSet, nil
+	payload := map[string]interface{}{
+		"name":   name,
+		"labels": labelsArray,
+		"runnerSetting": map[string]interface{}{
+			"ephemeral":     true,
+			"isElastic":     true,
+			"disableUpdate": false,
+		},
+	}
+
+	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
+	resp, err := c.makeActionsServiceRequest(ctx, http.MethodPost, url, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scale set request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var scaleSet RunnerScaleSet
+	if err := json.NewDecoder(resp.Body).Decode(&scaleSet); err != nil {
+		return nil, fmt.Errorf("failed to decode scale set response: %w", err)
+	}
+
+	c.logger.Info("Scale set created/retrieved", "id", scaleSet.ID, "name", scaleSet.Name)
+	return &scaleSet, nil
+}
+
+// listExistingScaleSets lists existing scale sets for debugging
+func (c *ActionsServiceClient) listExistingScaleSets(ctx context.Context) error {
+	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, apiVersion)
+	resp, err := c.makeActionsServiceRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to list scale sets: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	c.logger.Info("Existing scale sets response", "body", string(body))
+
+	// Try to parse as array of scale sets
+	var scaleSets []RunnerScaleSet
+	if err := json.Unmarshal(body, &scaleSets); err == nil {
+		c.logger.Info("Found existing scale sets", "count", len(scaleSets))
+		for i, ss := range scaleSets {
+			c.logger.Info("Existing scale set", 
+				"index", i, 
+				"id", ss.ID, 
+				"name", ss.Name,
+				"labels", c.extractLabelNames(ss.Labels))
+		}
+	}
+
+	return nil
+}
+
+// extractLabelNames extracts label names from Label array
+func (c *ActionsServiceClient) extractLabelNames(labels []Label) []string {
+	names := make([]string, len(labels))
+	for i, label := range labels {
+		names[i] = label.Name
+	}
+	return names
 }
 
 // GetAcquirableJobs gets jobs that can be acquired by the scale set
@@ -1044,4 +1096,27 @@ func (c *ActionsServiceClient) makeActionsServiceRequest(ctx context.Context, me
 // GetAdminToken returns the admin token for message queue access
 func (c *ActionsServiceClient) GetAdminToken() string {
 	return c.adminToken
+}
+
+// GetActiveSessions lists active sessions for debugging (not part of official API but helpful for troubleshooting)
+func (c *ActionsServiceClient) GetActiveSessions(ctx context.Context, scaleSetID int) error {
+	c.logger.Info("Attempting to debug active sessions", "scaleSetId", scaleSetID)
+	
+	// This is a diagnostic attempt - the official API might not expose this endpoint
+	// but we can try to gather information for troubleshooting
+	
+	return nil
+}
+
+// ForceDeleteSession attempts to delete a session by ID (for conflict resolution)
+func (c *ActionsServiceClient) ForceDeleteSession(ctx context.Context, scaleSetID int, sessionID string) error {
+	c.logger.Info("Attempting to force delete session", "scaleSetId", scaleSetID, "sessionId", sessionID)
+	
+	// Parse session ID as UUID
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		return fmt.Errorf("invalid session ID format: %w", err)
+	}
+	
+	return c.DeleteMessageSession(ctx, scaleSetID, &sessionUUID)
 }

@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,11 +136,32 @@ func (s *MessageQueueScaler) createMessageSession(ctx context.Context) error {
 		hostname = "ghaec2-scaler"
 	}
 
-	s.logger.Info("Creating message session", "owner", hostname)
+	// Add a unique suffix to avoid conflicts with other instances
+	randomBytes := make([]byte, 4)
+	rand.Read(randomBytes)
+	uniqueOwner := fmt.Sprintf("%s-%s", hostname, hex.EncodeToString(randomBytes))
 
-	session, err := s.actionsClient.CreateMessageSession(ctx, s.config.RunnerScaleSetID, hostname)
+	s.logger.Info("Creating message session", "owner", uniqueOwner)
+
+	session, err := s.actionsClient.CreateMessageSession(ctx, s.config.RunnerScaleSetID, uniqueOwner)
 	if err != nil {
-		return fmt.Errorf("failed to create message session: %w", err)
+		// Check if it's a session conflict error
+		if strings.Contains(err.Error(), "already has an active session") {
+			s.logger.Info("Session conflict detected, attempting to resolve", "owner", uniqueOwner)
+			
+			// Try with a different owner name
+			randomBytes = make([]byte, 8)
+			rand.Read(randomBytes)
+			uniqueOwner = fmt.Sprintf("ghaec2-%s", hex.EncodeToString(randomBytes))
+			
+			s.logger.Info("Retrying with different owner", "owner", uniqueOwner)
+			session, err = s.actionsClient.CreateMessageSession(ctx, s.config.RunnerScaleSetID, uniqueOwner)
+			if err != nil {
+				return fmt.Errorf("failed to create message session after retry: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to create message session: %w", err)
+		}
 	}
 
 	s.session = session
@@ -145,7 +169,8 @@ func (s *MessageQueueScaler) createMessageSession(ctx context.Context) error {
 
 	s.logger.Info("Message session created",
 		"sessionId", session.SessionID,
-		"messageQueueUrl", session.MessageQueueURL)
+		"messageQueueUrl", session.MessageQueueURL,
+		"owner", uniqueOwner)
 
 	return nil
 }
