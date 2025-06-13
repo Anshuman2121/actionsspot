@@ -18,8 +18,8 @@ import (
 
 // GitHub Actions Service API endpoints - using correct endpoints from actions-runner-controller
 const (
-	scaleSetEndpoint     = "_apis/runtime/runnerscalesets"
-	apiVersion           = "6.0-preview"
+	scaleSetEndpoint = "_apis/runtime/runnerscalesets"
+	apiVersion       = "6.0-preview"
 )
 
 // AcquirableJob represents a job that can be acquired by a runner
@@ -149,14 +149,14 @@ type ActionsServiceAdminConnection struct {
 
 // ActionsServiceClient provides access to GitHub Actions Service APIs
 type ActionsServiceClient struct {
-	httpClient           *http.Client
-	baseURL              string
-	token                string
-	logger               logr.Logger
-	actionsServiceURL    string
-	adminToken           string
-	adminTokenExpiry     time.Time
-	config               *GitHubConfig
+	httpClient        *http.Client
+	baseURL           string
+	token             string
+	logger            logr.Logger
+	actionsServiceURL string
+	adminToken        string
+	adminTokenExpiry  time.Time
+	config            *GitHubConfig
 }
 
 // GitHubConfig represents the parsed GitHub configuration URL
@@ -196,12 +196,12 @@ func ParseGitHubConfigFromURL(githubConfigURL string) (*GitHubConfig, error) {
 	}
 
 	pathParts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	
+
 	if len(pathParts) >= 1 {
 		config.Organization = pathParts[0]
 		config.Scope = GitHubScopeOrganization
 	}
-	
+
 	if len(pathParts) >= 2 {
 		config.Repository = pathParts[1]
 		config.Scope = GitHubScopeRepository
@@ -221,10 +221,10 @@ func min(a, b int) int {
 // NewActionsServiceClient creates a new Actions Service client
 func NewActionsServiceClient(gitHubEnterpriseURL, token string, logger logr.Logger) *ActionsServiceClient {
 	baseURL := strings.TrimSuffix(gitHubEnterpriseURL, "/")
-	
+
 	return &ActionsServiceClient{
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 5 * time.Minute, // timeout must be > 1m to accommodate long polling (like official implementation)
 		},
 		baseURL: baseURL,
 		token:   token,
@@ -236,13 +236,13 @@ func NewActionsServiceClient(gitHubEnterpriseURL, token string, logger logr.Logg
 func (c *ActionsServiceClient) InitializeConfig(org string) error {
 	// Construct the GitHub config URL for the organization
 	configURL := fmt.Sprintf("%s/%s", c.baseURL, org)
-	
+
 	config, err := ParseGitHubConfigFromURL(configURL)
 	if err != nil {
 		c.logger.Error(err, "Failed to parse GitHub config URL")
 		return fmt.Errorf("failed to parse GitHub config URL: %w", err)
 	}
-	
+
 	c.config = config
 	c.logger.Info("GitHub config initialized", "configURL", config.ConfigURL.String())
 	return nil
@@ -251,117 +251,117 @@ func (c *ActionsServiceClient) InitializeConfig(org string) error {
 // Initialize discovers the Actions Service URL and gets admin token
 func (c *ActionsServiceClient) Initialize(ctx context.Context, org string) error {
 	c.logger.Info("Initializing Actions Service client", "organization", org)
-	
+
 	// Initialize the GitHub config for this organization
 	if err := c.InitializeConfig(org); err != nil {
 		return fmt.Errorf("failed to initialize config: %w", err)
 	}
-	
+
 	// First, verify the token is valid and has proper permissions
 	if err := c.verifyToken(ctx, org); err != nil {
 		return fmt.Errorf("token verification failed: %w", err)
 	}
-	
+
 	// Check GHES version compatibility
 	if err := c.checkGHESCompatibility(ctx); err != nil {
 		return err
 	}
-	
+
 	// First, try to get a registration token to discover the Actions Service URL
 	regToken, err := c.getRegistrationToken(ctx, org)
 	if err != nil {
 		return fmt.Errorf("failed to get registration token: %w", err)
 	}
-	
+
 	c.logger.Info("Successfully obtained registration token")
-	
+
 	// Get Actions Service admin connection
 	adminConn, err := c.getActionsServiceAdminConnection(ctx, regToken, org)
 	if err != nil {
 		return fmt.Errorf("failed to get Actions Service admin connection: %w", err)
 	}
-	
+
 	if adminConn.ActionsServiceURL == nil || adminConn.AdminToken == nil {
 		return fmt.Errorf("invalid Actions Service connection response - missing URL or token")
 	}
-	
+
 	c.actionsServiceURL = *adminConn.ActionsServiceURL
 	c.adminToken = *adminConn.AdminToken
 	c.adminTokenExpiry = time.Now().Add(1 * time.Hour) // Tokens typically expire in 1 hour
-	
+
 	c.logger.Info("Successfully initialized Actions Service client",
 		"actionsServiceURL", c.actionsServiceURL,
 		"tokenExpiry", c.adminTokenExpiry,
 	)
-	
+
 	return nil
 }
 
 // getRegistrationToken gets a registration token from GitHub
 func (c *ActionsServiceClient) getRegistrationToken(ctx context.Context, org string) (*registrationToken, error) {
 	path := fmt.Sprintf("/orgs/%s/actions/runners/registration-token", org)
-	
+
 	req, err := c.NewGitHubAPIRequest(ctx, "POST", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	c.logger.Info("Registration token request", "url", req.URL.String())
-	
+
 	// Set authentication headers after creating request (simplified like official implementation)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, c.parseErrorResponse(resp)
 	}
-	
+
 	// Debug: Read the response body first to see what we're getting
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-	
+
 	c.logger.Info("Registration token response", "statusCode", resp.StatusCode, "contentType", resp.Header.Get("Content-Type"), "bodyLength", len(bodyBytes))
-	
+
 	// Check if response is HTML (which would indicate an error)
 	bodyStr := string(bodyBytes)
 	if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
 		return nil, fmt.Errorf("registration token endpoint returned HTML instead of JSON. This indicates your GHES version may not support this API endpoint. Response: %s", bodyStr[:min(500, len(bodyStr))])
 	}
-	
+
 	var token registrationToken
 	if err := json.Unmarshal(bodyBytes, &token); err != nil {
 		return nil, fmt.Errorf("failed to decode registration token (body: %s): %w", bodyStr[:min(200, len(bodyStr))], err)
 	}
-	
+
 	return &token, nil
 }
 
 // NewGitHubAPIRequest creates a new GitHub API request (matching official controller pattern)
 func (c *ActionsServiceClient) NewGitHubAPIRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	u := c.config.GitHubAPIURL(path)
-	
+
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new GitHub API request: %w", err)
 	}
-	
+
 	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
-	
+
 	return req, nil
 }
 
 // getActionsServiceAdminConnection gets the Actions Service URL and admin token
 func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Context, regToken *registrationToken, org string) (*ActionsServiceAdminConnection, error) {
 	path := "/actions/runner-registration"
-	
+
 	// Create request body exactly like the official controller
 	body := struct {
 		Url         string `json:"url"`
@@ -370,29 +370,29 @@ func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Cont
 		Url:         c.config.ConfigURL.String(), // Use proper config URL like official implementation
 		RunnerEvent: "register",
 	}
-	
+
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(false)
-	
+
 	if err := enc.Encode(body); err != nil {
 		return nil, fmt.Errorf("failed to encode body: %w", err)
 	}
-	
+
 	// Use NewGitHubAPIRequest to match official controller pattern
 	req, err := c.NewGitHubAPIRequest(ctx, http.MethodPost, path, buf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new GitHub API request: %w", err)
 	}
-	
+
 	// Override Authorization header for RemoteAuth
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("RemoteAuth %s", regToken.Token))
-	
+
 	c.logger.Info("Getting Actions Service admin connection (trying Actions Service API)",
 		"registrationURL", req.URL.String(),
 		"regTokenLength", len(regToken.Token))
-	
+
 	// Implement retry logic exactly like official controller
 	var resp *http.Response
 	retry := 0
@@ -403,12 +403,12 @@ func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Cont
 			return nil, fmt.Errorf("failed to issue the request: %w", err)
 		}
 		defer resp.Body.Close()
-		
+
 		// Success case
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			break
 		}
-		
+
 		// Read response body for error analysis
 		body, readErr := io.ReadAll(resp.Body)
 		var innerErr error
@@ -417,61 +417,61 @@ func (c *ActionsServiceClient) getActionsServiceAdminConnection(ctx context.Cont
 		} else {
 			innerErr = fmt.Errorf("%s", string(body))
 		}
-		
+
 		// Check if this is an HTML response (indication GHES doesn't support Actions Service)
 		if resp.StatusCode == 404 || strings.Contains(string(body), "<html") || strings.Contains(string(body), "<!DOCTYPE") {
 			return nil, fmt.Errorf("Actions Service API not supported on this GitHub Enterprise Server version. " +
 				"The endpoint '/actions/runner-registration' returned HTML instead of JSON. " +
 				"Please upgrade to a GHES version that supports Actions Service API (3.5+) or use traditional runners")
 		}
-		
+
 		// Handle auth errors with retry (like official controller)
 		if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 			return nil, fmt.Errorf("Actions Service registration failed (status: %d): %w", resp.StatusCode, innerErr)
 		}
-		
+
 		retry++
 		if retry > 5 {
 			return nil, fmt.Errorf("unable to register with Actions Service after 5 retries: %w", innerErr)
 		}
-		
+
 		// Add exponential backoff + jitter like official controller
 		baseDelay := 500 * time.Millisecond
 		jitter := time.Duration(rand.Intn(1000))
 		maxDelay := 20 * time.Second
 		delay := baseDelay*(1<<retry) + jitter*time.Millisecond
-		
+
 		if delay > maxDelay {
 			delay = maxDelay
 		}
-		
+
 		c.logger.Info("Retrying Actions Service registration", "retry", retry, "delay", delay)
 		time.Sleep(delay)
 	}
-	
+
 	var actionsServiceAdminConnection *ActionsServiceAdminConnection
 	if err := json.NewDecoder(resp.Body).Decode(&actionsServiceAdminConnection); err != nil {
 		return nil, fmt.Errorf("failed to decode Actions Service response: %w", err)
 	}
-	
+
 	if actionsServiceAdminConnection.ActionsServiceURL == nil || actionsServiceAdminConnection.AdminToken == nil {
 		return nil, fmt.Errorf("invalid Actions Service connection response - missing URL or token")
 	}
-	
+
 	c.logger.Info("Successfully obtained Actions Service admin connection",
 		"actionsServiceURL", *actionsServiceAdminConnection.ActionsServiceURL)
-	
+
 	return actionsServiceAdminConnection, nil
 }
 
 // refreshTokenIfNeeded refreshes the admin token if it's close to expiry
 func (c *ActionsServiceClient) refreshTokenIfNeeded(ctx context.Context) error {
-	if time.Now().Before(c.adminTokenExpiry.Add(-5*time.Minute)) {
+	if time.Now().Before(c.adminTokenExpiry.Add(-5 * time.Minute)) {
 		return nil // Token is still valid
 	}
-	
+
 	c.logger.Info("Refreshing admin token")
-	
+
 	// For Actions Service, we need to re-authenticate
 	return fmt.Errorf("token refresh not implemented - please reinitialize the client")
 }
@@ -481,9 +481,9 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 	if err := c.refreshTokenIfNeeded(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
-	
+
 	c.logger.Info("Getting or creating runner scale set", "name", name)
-	
+
 	// For now, return a mock scale set - in a real implementation,
 	// this would call the actual scale set creation APIs
 	scaleSet := &RunnerScaleSet{
@@ -496,7 +496,7 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 			IsElastic: true,
 		},
 	}
-	
+
 	// Convert string labels to Label objects
 	for i, label := range labels {
 		scaleSet.Labels[i] = Label{
@@ -505,7 +505,7 @@ func (c *ActionsServiceClient) GetOrCreateRunnerScaleSet(ctx context.Context, na
 			Type: "custom",
 		}
 	}
-	
+
 	return scaleSet, nil
 }
 
@@ -514,37 +514,37 @@ func (c *ActionsServiceClient) GetAcquirableJobs(ctx context.Context, scaleSetID
 	if err := c.refreshTokenIfNeeded(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
-	
+
 	path := fmt.Sprintf("/%s/%d/acquirablejobs", scaleSetEndpoint, scaleSetID)
 	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, path, apiVersion)
-	
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.adminToken))
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == http.StatusNoContent {
 		return &AcquirableJobList{Count: 0, Jobs: []AcquirableJob{}}, nil
 	}
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseErrorResponse(resp)
 	}
-	
+
 	var jobList AcquirableJobList
 	if err := json.NewDecoder(resp.Body).Decode(&jobList); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	return &jobList, nil
 }
 
@@ -553,42 +553,46 @@ func (c *ActionsServiceClient) CreateMessageSession(ctx context.Context, scaleSe
 	if err := c.refreshTokenIfNeeded(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
-	
+
 	path := fmt.Sprintf("/%s/%d/sessions", scaleSetEndpoint, scaleSetID)
 	url := fmt.Sprintf("%s%s?api-version=%s", c.actionsServiceURL, path, apiVersion)
-	
+
 	newSession := &RunnerScaleSetSession{
 		OwnerName: owner,
+		RunnerScaleSet: &RunnerScaleSet{
+			ID:   scaleSetID,
+			Name: "ghaec2-scaler",
+		},
 	}
-	
+
 	body, err := json.Marshal(newSession)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal session: %w", err)
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.adminToken))
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseErrorResponse(resp)
 	}
-	
+
 	var session RunnerScaleSetSession
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	return &session, nil
 }
 
@@ -599,48 +603,51 @@ func (c *ActionsServiceClient) GetMessage(ctx context.Context, messageQueueURL, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse message queue URL: %w", err)
 	}
-	
-	// Get existing query parameters
-	params := u.Query()
-	params.Set("lastMessageId", fmt.Sprintf("%d", lastMessageID))
-	if maxCapacity > 0 {
-		params.Set("runnerCapacity", fmt.Sprintf("%d", maxCapacity))
+
+	// Add lastMessageId parameter only if > 0 (like official implementation)
+	if lastMessageID > 0 {
+		params := u.Query()
+		params.Set("lastMessageId", fmt.Sprintf("%d", lastMessageID))
+		u.RawQuery = params.Encode()
 	}
-	
-	// Update the URL with the new parameters
-	u.RawQuery = params.Encode()
-	finalURL := u.String()
-	
-	// Create empty JSON body for POST request
-	emptyBody := strings.NewReader("{}")
-	
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, emptyBody)
+
+	// Validate maxCapacity (like official implementation)
+	if maxCapacity < 0 {
+		return nil, fmt.Errorf("maxCapacity must be greater than or equal to 0")
+	}
+
+	// Use GET method like official implementation
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
+	// Use exact headers from official implementation
+	req.Header.Set("Accept", "application/json; api-version=6.0-preview")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	req.Header.Set("Content-Type", "application/json")
-	
+	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
+	req.Header.Set("X-GitHub-Actions-Scale-Set-Max-Capacity", fmt.Sprintf("%d", maxCapacity))
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-	
-	if resp.StatusCode == http.StatusNoContent {
+
+	// Handle StatusAccepted like official implementation
+	if resp.StatusCode == http.StatusAccepted {
 		return nil, nil // No messages
 	}
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseErrorResponse(resp)
 	}
-	
+
 	var message RunnerScaleSetMessage
 	if err := json.NewDecoder(resp.Body).Decode(&message); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	return &message, nil
 }
 
@@ -654,12 +661,12 @@ func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
 			Message:    "Failed to read error response",
 		}
 	}
-	
+
 	c.logger.Info("API error response",
 		"statusCode", resp.StatusCode,
 		"requestId", resp.Header.Get("X-GitHub-Request-Id"),
 		"body", string(body))
-	
+
 	// Try to parse as GitHub API error
 	var ghErr struct {
 		Message string `json:"message"`
@@ -670,7 +677,7 @@ func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
 		} `json:"errors"`
 		DocumentationURL string `json:"documentation_url"`
 	}
-	
+
 	if err := json.Unmarshal(body, &ghErr); err != nil {
 		// If we can't parse the JSON, return the raw body
 		return &ActionsError{
@@ -679,7 +686,7 @@ func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
 			Message:    string(body),
 		}
 	}
-	
+
 	// Build detailed error message
 	var messages []string
 	messages = append(messages, ghErr.Message)
@@ -688,7 +695,7 @@ func (c *ActionsServiceClient) parseErrorResponse(resp *http.Response) error {
 			messages = append(messages, fmt.Sprintf("%s: %s", e.Field, e.Message))
 		}
 	}
-	
+
 	return &ActionsError{
 		StatusCode: resp.StatusCode,
 		ActivityID: resp.Header.Get("X-GitHub-Request-Id"),
@@ -706,135 +713,135 @@ func (c *ActionsServiceClient) checkGHESCompatibility(ctx context.Context) error
 		c.logger.Info("Could not create version check request", "error", err)
 		return nil // Don't fail on version check
 	}
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.logger.Info("Could not check GHES version", "error", err)
 		return nil // Don't fail on version check
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == 200 {
 		var meta struct {
 			GitHubServicesGheVersion string `json:"github_services_ghe_version"`
 			InstalledVersion         string `json:"installed_version"`
 		}
-		
+
 		if err := json.NewDecoder(resp.Body).Decode(&meta); err == nil {
 			version := meta.GitHubServicesGheVersion
 			if version == "" {
 				version = meta.InstalledVersion
 			}
-			
+
 			c.logger.Info("Detected GitHub Enterprise Server version", "version", version)
-			
+
 			// Actions Service API was introduced in GHES 3.5+
-			if strings.HasPrefix(version, "3.0") || strings.HasPrefix(version, "3.1") || 
-			   strings.HasPrefix(version, "3.2") || strings.HasPrefix(version, "3.3") || 
-			   strings.HasPrefix(version, "3.4") {
+			if strings.HasPrefix(version, "3.0") || strings.HasPrefix(version, "3.1") ||
+				strings.HasPrefix(version, "3.2") || strings.HasPrefix(version, "3.3") ||
+				strings.HasPrefix(version, "3.4") {
 				return fmt.Errorf("GitHub Enterprise Server version %s detected. Actions Service API requires GHES 3.5 or later. "+
 					"Please upgrade your GHES instance or use traditional runners", version)
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 // verifyToken checks if the GitHub token is valid and has required permissions
 func (c *ActionsServiceClient) verifyToken(ctx context.Context, org string) error {
 	c.logger.Info("Verifying GitHub token permissions", "organization", org)
-	
+
 	// Test 1: Check if token can access the API at all
 	path := "/user"
 	req, err := c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create user request: %w", err)
 	}
-	
+
 	// Add authentication headers (simplified like official implementation)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute user request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == 401 {
 		return fmt.Errorf("GitHub token is invalid or expired. Please check your GITHUB_TOKEN environment variable")
 	}
-	
+
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("token verification failed (status: %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	var user struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&user); err == nil {
 		c.logger.Info("Token validated successfully", "user", user.Login, "type", user.Type)
 	}
-	
+
 	// Test 2: Check if token can access the organization
 	path = fmt.Sprintf("/orgs/%s", org)
 	req, err = c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create org request: %w", err)
 	}
-	
+
 	// Add authentication headers (simplified like official implementation)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
-	
+
 	resp, err = c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute org request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == 404 {
 		return fmt.Errorf("organization '%s' not found or token doesn't have access to it", org)
 	}
-	
+
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("organization access check failed (status: %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	c.logger.Info("Token has access to organization", "organization", org)
-	
+
 	// Test 3: Check if token has Actions permissions
 	path = fmt.Sprintf("/orgs/%s/actions/permissions", org)
 	req, err = c.NewGitHubAPIRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create actions permissions request: %w", err)
 	}
-	
+
 	// Add authentication headers (simplified like official implementation)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	req.Header.Set("Content-Type", "application/vnd.github.v3+json")
-	
+
 	resp, err = c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute actions permissions request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == 403 {
 		return fmt.Errorf("token doesn't have Actions permissions. Please ensure the token has 'actions:read' or 'admin:org' scope")
 	}
-	
+
 	if resp.StatusCode == 200 {
 		c.logger.Info("Token has Actions permissions")
 	} else {
 		c.logger.Info("Actions permissions check returned status", "status", resp.StatusCode)
 	}
-	
+
 	return nil
 }
 
@@ -843,41 +850,41 @@ func (c *ActionsServiceClient) AcquireJobs(ctx context.Context, runnerScaleSetID
 	payload := map[string]interface{}{
 		"requestIds": requestIDs,
 	}
-	
+
 	url := fmt.Sprintf("%s/%s/%d/jobs", c.actionsServiceURL, scaleSetEndpoint, runnerScaleSetID)
-	
+
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal payload: %w", err)
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+messageQueueAccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("failed to acquire jobs (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	var result struct {
 		Value []int64 `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode acquire jobs response: %w", err)
 	}
-	
+
 	return result.Value, nil
 }
 
@@ -886,24 +893,24 @@ func (c *ActionsServiceClient) RefreshMessageSession(ctx context.Context, runner
 	if sessionID == nil {
 		return nil, fmt.Errorf("session ID is nil")
 	}
-	
+
 	url := fmt.Sprintf("%s/%s/%d/sessions/%s", c.actionsServiceURL, scaleSetEndpoint, runnerScaleSetID, sessionID.String())
 	resp, err := c.makeActionsServiceRequest(ctx, "POST", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh message session: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("failed to refresh message session (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	var session RunnerScaleSetSession
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		return nil, fmt.Errorf("failed to decode session response: %w", err)
 	}
-	
+
 	return &session, nil
 }
 
@@ -912,32 +919,40 @@ func (c *ActionsServiceClient) DeleteMessage(ctx context.Context, messageQueueUR
 	if messageQueueURL == "" || messageID == 0 {
 		return nil // Nothing to delete
 	}
-	
-	params := url.Values{}
-	params.Set("api-version", apiVersion)
+
+	// Parse the existing URL to properly add query parameters
+	u, err := url.Parse(messageQueueURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse message queue URL: %w", err)
+	}
+
+	// Get existing query parameters and add messageId
+	params := u.Query()
 	params.Set("messageId", fmt.Sprintf("%d", messageID))
-	
-	url := fmt.Sprintf("%s?%s", messageQueueURL, params.Encode())
-	
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+
+	// Update the URL with the new parameters
+	u.RawQuery = params.Encode()
+	finalURL := u.String()
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", finalURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+messageQueueAccessToken)
 	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to delete message (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	return nil
 }
 
@@ -946,19 +961,19 @@ func (c *ActionsServiceClient) DeleteMessageSession(ctx context.Context, runnerS
 	if sessionID == nil {
 		return nil // Nothing to delete
 	}
-	
+
 	url := fmt.Sprintf("%s/%s/%d/sessions/%s?api-version=%s", c.actionsServiceURL, scaleSetEndpoint, runnerScaleSetID, sessionID.String(), apiVersion)
 	resp, err := c.makeActionsServiceRequest(ctx, "DELETE", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete message session: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to delete message session (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	return nil
 }
 
@@ -984,13 +999,18 @@ func (c *ActionsServiceClient) makeActionsServiceRequest(ctx context.Context, me
 	} else {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	
+
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "ghaec2-scaler/1.0")
-	
+
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	return c.httpClient.Do(req)
+}
+
+// GetAdminToken returns the admin token for message queue access
+func (c *ActionsServiceClient) GetAdminToken() string {
+	return c.adminToken
 }

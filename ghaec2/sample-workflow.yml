@@ -1,0 +1,38 @@
+# Sample GitHub Actions workflow to test the EC2 scaler
+# Place this file in your repository at: .github/workflows/test-scaler.yml
+
+name: Test EC2 Scaler
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  test-scaler:
+    # This will trigger the EC2 scaler because it matches the labels
+    runs-on: [self-hosted, linux, x64, ghalistener-managed]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Test step that will trigger scaling
+      run: |
+        echo "This job will be detected by the EC2 scaler!"
+        echo "Current time: $(date)"
+        echo "Hostname: $(hostname)"
+        echo "Running on self-hosted runner managed by ghaec2"
+        
+    - name: Simulate some work
+      run: |
+        echo "Simulating work for 30 seconds..."
+        sleep 30
+        echo "Work completed!"
+        
+    - name: Show environment
+      run: |
+        echo "Environment variables:"
+        env | grep -E "(GITHUB_|RUNNER_)" | sort 

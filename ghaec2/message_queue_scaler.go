@@ -16,33 +16,33 @@ import (
 // MessageQueueScaler implements the same pattern as actions-runner-controller AutoscalingListener
 // It polls GitHub's Actions Service message queue for job events and scales EC2 instances accordingly
 type MessageQueueScaler struct {
-	config         *Config
-	ec2Client      *ec2.Client
-	actionsClient  *ActionsServiceClient
-	logger         logr.Logger
-	
+	config        *Config
+	ec2Client     *ec2.Client
+	actionsClient *ActionsServiceClient
+	logger        logr.Logger
+
 	// Scale set and session management (like AutoscalingListener)
-	scaleSet       *RunnerScaleSet
-	session        *RunnerScaleSetSession
-	lastMessageID  int64
-	
+	scaleSet      *RunnerScaleSet
+	session       *RunnerScaleSetSession
+	lastMessageID int64
+
 	// Runner tracking
-	runnerTracker  *EC2RunnerTracker
-	mu             sync.RWMutex
+	runnerTracker *EC2RunnerTracker
+	mu            sync.RWMutex
 }
 
 // EC2RunnerTracker tracks EC2 instances acting as GitHub Actions runners
 type EC2RunnerTracker struct {
-	mu            sync.RWMutex
-	instances     map[string]*EC2RunnerInstance // instanceID -> instance info
-	logger        logr.Logger
+	mu        sync.RWMutex
+	instances map[string]*EC2RunnerInstance // instanceID -> instance info
+	logger    logr.Logger
 }
 
 // EC2RunnerInstance represents an EC2 instance running as a GitHub Actions runner
 type EC2RunnerInstance struct {
 	InstanceID   string    `json:"instanceId"`
 	LaunchTime   time.Time `json:"launchTime"`
-	State        string    `json:"state"`        // "pending", "running", "terminating"
+	State        string    `json:"state"` // "pending", "running", "terminating"
 	JobID        int64     `json:"jobId,omitempty"`
 	RunnerID     int64     `json:"runnerId,omitempty"`
 	Labels       []string  `json:"labels"`
@@ -52,7 +52,7 @@ type EC2RunnerInstance struct {
 // NewMessageQueueScaler creates a new message queue-based scaler
 func NewMessageQueueScaler(config *Config, ec2Client *ec2.Client, logger logr.Logger) *MessageQueueScaler {
 	actionsClient := NewActionsServiceClient(config.GitHubEnterpriseURL, config.GitHubToken, logger.WithName("actions-client"))
-	
+
 	tracker := &EC2RunnerTracker{
 		instances: make(map[string]*EC2RunnerInstance),
 		logger:    logger.WithName("runner-tracker"),
@@ -70,7 +70,7 @@ func NewMessageQueueScaler(config *Config, ec2Client *ec2.Client, logger logr.Lo
 // Run starts the message queue scaler (following AutoscalingListener.Listen pattern)
 func (s *MessageQueueScaler) Run(ctx context.Context) error {
 	s.logger.Info("Starting Message Queue Scaler")
-	
+
 	// Initialize Actions Service connection (like actions-runner-controller)
 	if err := s.initializeActionsService(ctx); err != nil {
 		return fmt.Errorf("failed to initialize Actions Service: %w", err)
@@ -80,13 +80,13 @@ func (s *MessageQueueScaler) Run(ctx context.Context) error {
 	if err := s.initializeScaleSet(ctx); err != nil {
 		return fmt.Errorf("failed to initialize scale set: %w", err)
 	}
-	
+
 	// Create message session (like AutoscalingListener.createSession)
 	if err := s.createMessageSession(ctx); err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)
 	}
 	defer s.cleanupSession(ctx)
-	
+
 	// Handle initial statistics and start message polling loop (like Listener.Listen)
 	return s.startMessagePolling(ctx)
 }
@@ -94,36 +94,35 @@ func (s *MessageQueueScaler) Run(ctx context.Context) error {
 // initializeActionsService initializes the Actions Service connection
 func (s *MessageQueueScaler) initializeActionsService(ctx context.Context) error {
 	s.logger.Info("Initializing Actions Service connection")
-	
+
 	if err := s.actionsClient.Initialize(ctx, s.config.OrganizationName); err != nil {
 		return fmt.Errorf("failed to initialize Actions Service client: %w", err)
 	}
-	
+
 	s.logger.Info("Actions Service connection established",
 		"actionsServiceURL", s.actionsClient.actionsServiceURL)
-	
+
 	return nil
 }
-
 
 // initializeScaleSet creates or gets the runner scale set (like autoscalingrunnerset_controller.go)
 func (s *MessageQueueScaler) initializeScaleSet(ctx context.Context) error {
 	s.logger.Info("Initializing runner scale set", "name", s.config.RunnerScaleSetName)
-	
+
 	scaleSet, err := s.actionsClient.GetOrCreateRunnerScaleSet(ctx, s.config.RunnerScaleSetName, s.config.RunnerLabels)
 	if err != nil {
 		return fmt.Errorf("failed to get or create scale set: %w", err)
 	}
-	
+
 	s.scaleSet = scaleSet
 	s.config.RunnerScaleSetID = scaleSet.ID
-	
+
 	s.logger.Info("Scale set initialized",
 		"id", scaleSet.ID,
 		"name", scaleSet.Name,
 		"labels", s.extractLabelNames(scaleSet.Labels),
 	)
-	
+
 	return nil
 }
 
@@ -133,21 +132,21 @@ func (s *MessageQueueScaler) createMessageSession(ctx context.Context) error {
 	if hostname == "" {
 		hostname = "ghaec2-scaler"
 	}
-	
+
 	s.logger.Info("Creating message session", "owner", hostname)
-	
+
 	session, err := s.actionsClient.CreateMessageSession(ctx, s.config.RunnerScaleSetID, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)
 	}
-	
+
 	s.session = session
 	s.lastMessageID = 0
-	
+
 	s.logger.Info("Message session created",
 		"sessionId", session.SessionID,
 		"messageQueueUrl", session.MessageQueueURL)
-	
+
 	return nil
 }
 
@@ -173,17 +172,17 @@ func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
 		"busyRunners", s.session.Statistics.TotalBusyRunners,
 		"idleRunners", s.session.Statistics.TotalIdleRunners,
 	)
-	
+
 	// Handle initial desired runner count (like Listener.Listen)
 	desiredRunners, err := s.handleDesiredRunnerCount(ctx, initialMessage.Statistics.TotalAssignedJobs, 0)
 	if err != nil {
 		return fmt.Errorf("handling initial message failed: %w", err)
 	}
 	s.logger.Info("Initial desired runners calculated", "desiredRunners", desiredRunners)
-	
+
 	// Start the message polling loop (exactly like Listener.Listen)
 	s.logger.Info("Starting message polling loop")
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -217,13 +216,13 @@ func (s *MessageQueueScaler) startMessagePolling(ctx context.Context) error {
 // getMessage gets the next message from the queue (like Listener.getMessage)
 func (s *MessageQueueScaler) getMessage(ctx context.Context) (*RunnerScaleSetMessage, error) {
 	s.logger.V(1).Info("Getting next message", "lastMessageID", s.lastMessageID)
-	
-	msg, err := s.actionsClient.GetMessage(ctx, 
-		s.session.MessageQueueURL, 
-		s.session.MessageQueueAccessToken, 
-		s.lastMessageID, 
+
+	msg, err := s.actionsClient.GetMessage(ctx,
+		s.session.MessageQueueURL,
+		s.session.MessageQueueAccessToken,
+		s.lastMessageID,
 		s.config.MaxRunners)
-	
+
 	if err == nil {
 		return msg, nil
 	}
@@ -235,10 +234,10 @@ func (s *MessageQueueScaler) getMessage(ctx context.Context) (*RunnerScaleSetMes
 		}
 
 		// Retry after session refresh
-		msg, err = s.actionsClient.GetMessage(ctx, 
-			s.session.MessageQueueURL, 
-			s.session.MessageQueueAccessToken, 
-			s.lastMessageID, 
+		msg, err = s.actionsClient.GetMessage(ctx,
+			s.session.MessageQueueURL,
+			s.session.MessageQueueAccessToken,
+			s.lastMessageID,
 			s.config.MaxRunners)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get next message after session refresh: %w", err)
@@ -286,7 +285,7 @@ func (s *MessageQueueScaler) handleMessage(ctx context.Context, msg *RunnerScale
 	if err != nil {
 		return fmt.Errorf("failed to handle desired runner count: %w", err)
 	}
-	
+
 	s.logger.Info("Desired runners calculated", "desiredRunners", desiredRunners)
 	return nil
 }
@@ -324,7 +323,7 @@ func (s *MessageQueueScaler) parseMessage(ctx context.Context, msg *RunnerScaleS
 	}
 
 	s.logger.Info("Processing message", "messageId", msg.MessageID, "messageType", msg.MessageType)
-	
+
 	if msg.Statistics == nil {
 		return nil, fmt.Errorf("invalid message: statistics is nil")
 	}
@@ -395,7 +394,7 @@ func (s *MessageQueueScaler) acquireAvailableJobs(ctx context.Context, jobsAvail
 
 	s.logger.Info("Acquiring jobs", "count", len(ids), "requestIds", ids)
 
-	idsAcquired, err := s.actionsClient.AcquireJobs(ctx, s.config.RunnerScaleSetID, s.session.MessageQueueAccessToken, ids)
+	idsAcquired, err := s.actionsClient.AcquireJobs(ctx, s.config.RunnerScaleSetID, s.actionsClient.adminToken, ids)
 	if err == nil {
 		return idsAcquired, nil
 	}
@@ -448,7 +447,7 @@ func (s *MessageQueueScaler) handleDesiredRunnerCount(ctx context.Context, assig
 
 	// Calculate desired runners based on assigned jobs (following actions-runner-controller logic)
 	desiredRunners := assignedJobs
-	
+
 	// Ensure we stay within min/max bounds
 	if desiredRunners < s.config.MinRunners {
 		desiredRunners = s.config.MinRunners
@@ -467,7 +466,7 @@ func (s *MessageQueueScaler) handleDesiredRunnerCount(ctx context.Context, assig
 	if desiredRunners > currentRunners {
 		runnersToCreate := desiredRunners - currentRunners
 		s.logger.Info("Scaling up", "runnersToCreate", runnersToCreate)
-		
+
 		for i := 0; i < runnersToCreate; i++ {
 			if err := s.createRunner(ctx); err != nil {
 				s.logger.Error(err, "Failed to create runner", "attempt", i+1)
@@ -479,7 +478,7 @@ func (s *MessageQueueScaler) handleDesiredRunnerCount(ctx context.Context, assig
 	if desiredRunners < currentRunners {
 		runnersToTerminate := currentRunners - desiredRunners
 		s.logger.Info("Scaling down", "runnersToTerminate", runnersToTerminate)
-		
+
 		if err := s.terminateIdleRunners(ctx, runnersToTerminate); err != nil {
 			s.logger.Error(err, "Failed to terminate idle runners")
 		}
@@ -494,7 +493,7 @@ func (s *MessageQueueScaler) getCurrentRunnerCount(ctx context.Context) (int, er
 	s.runnerTracker.mu.RLock()
 	count := len(s.runnerTracker.instances)
 	s.runnerTracker.mu.RUnlock()
-	
+
 	// TODO: Also query EC2 to get actual current count and sync with tracker
 	return count, nil
 }
@@ -502,14 +501,14 @@ func (s *MessageQueueScaler) getCurrentRunnerCount(ctx context.Context) (int, er
 // createRunner creates a new EC2 runner instance
 func (s *MessageQueueScaler) createRunner(ctx context.Context) error {
 	s.logger.Info("Creating new EC2 runner instance")
-	
+
 	// TODO: Implement actual EC2 instance creation
 	// This should:
 	// 1. Launch EC2 spot instance with runner configuration
 	// 2. Install GitHub Actions runner
 	// 3. Register runner with GitHub
 	// 4. Add to runnerTracker
-	
+
 	// Placeholder implementation
 	instanceID := fmt.Sprintf("i-%s", uuid.New().String()[:8])
 	instance := &EC2RunnerInstance{
@@ -519,11 +518,11 @@ func (s *MessageQueueScaler) createRunner(ctx context.Context) error {
 		Labels:       s.config.RunnerLabels,
 		LastActivity: time.Now(),
 	}
-	
+
 	s.runnerTracker.mu.Lock()
 	s.runnerTracker.instances[instanceID] = instance
 	s.runnerTracker.mu.Unlock()
-	
+
 	s.logger.Info("EC2 runner instance created", "instanceId", instanceID)
 	return nil
 }
@@ -531,10 +530,10 @@ func (s *MessageQueueScaler) createRunner(ctx context.Context) error {
 // terminateIdleRunners terminates idle runner instances
 func (s *MessageQueueScaler) terminateIdleRunners(ctx context.Context, count int) error {
 	s.logger.Info("Terminating idle runners", "count", count)
-	
+
 	s.runnerTracker.mu.Lock()
 	defer s.runnerTracker.mu.Unlock()
-	
+
 	// Find idle runners to terminate
 	var idleRunners []*EC2RunnerInstance
 	for _, instance := range s.runnerTracker.instances {
@@ -542,27 +541,27 @@ func (s *MessageQueueScaler) terminateIdleRunners(ctx context.Context, count int
 			idleRunners = append(idleRunners, instance)
 		}
 	}
-	
+
 	// Terminate the requested number of idle runners
 	terminated := 0
 	for _, instance := range idleRunners {
 		if terminated >= count {
 			break
 		}
-		
+
 		s.logger.Info("Terminating idle runner", "instanceId", instance.InstanceID)
-		
+
 		// TODO: Implement actual EC2 termination
 		// This should:
 		// 1. Unregister runner from GitHub
 		// 2. Terminate EC2 instance
 		// 3. Remove from runnerTracker
-		
+
 		// Placeholder implementation
 		delete(s.runnerTracker.instances, instance.InstanceID)
 		terminated++
 	}
-	
+
 	s.logger.Info("Terminated idle runners", "terminated", terminated)
 	return nil
 }
@@ -579,7 +578,7 @@ func (s *MessageQueueScaler) extractLabelNames(labels []Label) []string {
 
 func (s *MessageQueueScaler) refreshSession(ctx context.Context) error {
 	s.logger.Info("Message queue token expired, refreshing session...")
-	
+
 	session, err := s.actionsClient.RefreshMessageSession(ctx, s.session.RunnerScaleSet.ID, s.session.SessionID)
 	if err != nil {
 		return fmt.Errorf("refresh message session failed: %w", err)
@@ -591,7 +590,7 @@ func (s *MessageQueueScaler) refreshSession(ctx context.Context) error {
 
 func (s *MessageQueueScaler) deleteLastMessage(ctx context.Context) error {
 	s.logger.V(1).Info("Deleting last message", "lastMessageID", s.lastMessageID)
-	
+
 	err := s.actionsClient.DeleteMessage(ctx, s.session.MessageQueueURL, s.session.MessageQueueAccessToken, s.lastMessageID)
 	if err == nil {
 		return nil
@@ -618,9 +617,9 @@ func (s *MessageQueueScaler) cleanupSession(ctx context.Context) {
 	if s.session != nil && s.session.SessionID != nil {
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		
+
 		s.logger.Info("Deleting message session")
-		
+
 		if err := s.actionsClient.DeleteMessageSession(ctx, s.session.RunnerScaleSet.ID, s.session.SessionID); err != nil {
 			s.logger.Error(err, "Failed to delete message session")
 		}
@@ -629,6 +628,6 @@ func (s *MessageQueueScaler) cleanupSession(ctx context.Context) {
 
 func isMessageQueueTokenExpiredError(err error) bool {
 	// TODO: Implement proper error type checking
-	return err != nil && (err.Error() == "message queue token expired" || 
+	return err != nil && (err.Error() == "message queue token expired" ||
 		err.Error() == "unauthorized")
-} 
+}
